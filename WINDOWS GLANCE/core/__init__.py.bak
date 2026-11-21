@@ -1,0 +1,13 @@
+self.worker = SystemWorker()
+self.worker.status.connect(self.on_status)
+self.worker.media.connect(self.on_media)
+
+self.wx_worker = WeatherWorker(self.city, self.unit)
+self.wx_worker.updated.connect(self.on_weather)
+self.wx_worker.failed.connect(self.on_weather_failed)
+
+self.context_menu = ContextMenuController(
+    self,
+    startup_enabled,
+    set_startup,
+)
