@@ -500,7 +500,7 @@ class PainterMixin:
         draw_text(
             p,
             tt,
-            EXP_W - 16 - QFontMetricsF(tf).horizontalAdvance(tt),
+            EXP_W - 66 - QFontMetricsF(tf).horizontalAdvance(tt),
             38,
             tf,
             th.text
@@ -821,11 +821,11 @@ class PainterMixin:
         self._paint_weather_strip(p)
 
         # Notification bell
-        bell_rect = QRectF(EXP_W - 54, 8, 36, 34)
+        bell_rect = QRectF(EXP_W - 44, 8, 36, 34)
 
         if self.hover_item == ("notifications", None):
-            p.serPen(Qt.PenStyle.NoPen)
-            p.setBrush(th.title_hover)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(th.tile_hover)
             p.drawRoundedRect(bell_rect, 8, 8)
 
         draw_glyph(
@@ -1090,7 +1090,8 @@ class PainterMixin:
             draw_text(
                 p,
                 end,
-                EXP_W - 16 - QFontMetricsF(f).horizontalAdvance(end),
+                EXP_W - 60 -
+                QFontMetricsF(tf).horizontalAdvance(tt),
                 y0 + 102,
                 f,
                 th.sub

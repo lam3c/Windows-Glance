@@ -844,7 +844,7 @@ class WindowsGlance(PainterMixin, QWidget):
             return None
 
         # Notification bell
-        if QRect(EXP_W - 44, 8, 36, 34).contains(rel.toPoint()):
+        if QRect(EXP_W - 54, 8, 36, 34).contains(rel.toPoint()):
             return ("notifications", None)
 
         for i in range(3):
