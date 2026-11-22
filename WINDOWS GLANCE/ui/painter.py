@@ -1,5 +1,4 @@
-﻿
-"""
+﻿"""
 Windows Glance - UI Painter
 
 Handles visual rendering for the Windows Glance interface.
@@ -1090,8 +1089,7 @@ class PainterMixin:
             draw_text(
                 p,
                 end,
-                EXP_W - 60 -
-                QFontMetricsF(tf).horizontalAdvance(tt),
+                EXP_W - 16 - QFontMetricsF(f).horizontalAdvance(end),
                 y0 + 102,
                 f,
                 th.sub
