@@ -1,412 +1,406 @@
+
+import sys
 from collections import deque
 
-from PySide6.QtCore import Qt, QThread
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import Qt, QThread, QTimer, QPointF
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QGridLayout,
+    QApplication,
     QFrame,
+    QGridLayout,
+    QHBoxLayout,
     QLabel,
+    QMainWindow,
     QProgressBar,
+    QVBoxLayout,
+    QWidget,
 )
 
 from core.system_monitor_worker import SystemMonitorWorker
 
 
-# =========================================================
-# THEME
-# =========================================================
+# ---------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------
 
-BACKGROUND = "#0B1220"
-CARD_BACKGROUND = "#121A27"
-CARD_BORDER = "#26364D"
+def format_bytes(value):
+    value = float(value)
 
-PRIMARY_TEXT = "#E5EDF7"
-SECONDARY_TEXT = "#8293AC"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
 
-ACCENT = "#22D3EE"
-GREEN = "#34D399"
-BLUE = "#60A5FA"
-ORANGE = "#FBBF24"
+    return f"{value:.1f} TB"
 
 
-# =========================================================
-# METRIC CARD
-# =========================================================
+def format_speed(value):
+    return f"{format_bytes(value)}/s"
 
-class MetricCard(QFrame):
-    """A reusable card for displaying a system metric."""
 
-    def __init__(self, title, colour=ACCENT, parent=None):
+# ---------------------------------------------------------
+# History chart
+# ---------------------------------------------------------
+
+class HistoryChart(QWidget):
+    def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.colour = colour
-
-        self.setObjectName("MetricCard")
-        self.setMinimumHeight(145)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
-
-        self.title_label = QLabel(title)
-        self.title_label.setStyleSheet(
-            f"color: {SECONDARY_TEXT}; font-size: 12px;"
-        )
-
-        self.value_label = QLabel("0%")
-        self.value_label.setStyleSheet(
-            f"color: {PRIMARY_TEXT}; "
-            "font-size: 27px; font-weight: 600;"
-        )
-
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(7)
-
-        self.progress.setStyleSheet(f"""
-            QProgressBar {{
-                background-color: #263447;
-                border: none;
-                border-radius: 3px;
-            }}
-
-            QProgressBar::chunk {{
-                background-color: {self.colour};
-                border-radius: 3px;
-            }}
-        """)
-
-        self.detail_label = QLabel("Waiting for data...")
-        self.detail_label.setStyleSheet(
-            f"color: {SECONDARY_TEXT}; font-size: 11px;"
-        )
-
-        layout.addWidget(self.title_label)
-        layout.addWidget(self.value_label)
-        layout.addWidget(self.progress)
-        layout.addWidget(self.detail_label)
-
-        self.setStyleSheet(f"""
-            QFrame#MetricCard {{
-                background-color: {CARD_BACKGROUND};
-                border: 1px solid {CARD_BORDER};
-                border-radius: 12px;
-            }}
-        """)
-
-    def update_metric(self, value, detail="", suffix="%"):
-        """Update the card's value, progress and supporting text."""
-
-        numeric_value = max(0, min(100, int(round(value))))
-
-        self.value_label.setText(f"{numeric_value}{suffix}")
-        self.progress.setValue(numeric_value)
-        self.detail_label.setText(detail)
-
-
-# =========================================================
-# LIVE HISTORY GRAPH
-# =========================================================
-
-class LiveGraph(QWidget):
-    """Displays a scrolling history of metric readings."""
-
-    def __init__(self, title, colour=ACCENT, parent=None):
-        super().__init__(parent)
-
-        self.title = title
-        self.colour = QColor(colour)
-        self.values = deque([0.0] * 60, maxlen=60)
-
-        self.setMinimumHeight(190)
+        self.values = deque(maxlen=60)
+        self.setMinimumHeight(85)
 
     def add_value(self, value):
-        """Append a new reading and repaint the graph."""
-
-        value = max(0.0, min(100.0, float(value)))
-
-        self.values.append(value)
+        self.values.append(max(0.0, float(value)))
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        painter.setRenderHint(
-            QPainter.RenderHint.Antialiasing
-        )
+        rect = self.rect().adjusted(5, 8, -5, -8)
 
-        rect = self.rect()
-
-        # Card background.
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(CARD_BACKGROUND))
-        painter.drawRoundedRect(rect, 12, 12)
-
-        # Card border.
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(CARD_BORDER), 1))
-        painter.drawRoundedRect(
-            rect.adjusted(0, 0, -1, -1),
-            12,
-            12,
-        )
-
-        # Graph heading.
-        painter.setPen(QColor(PRIMARY_TEXT))
-        painter.drawText(16, 27, self.title)
-
-        left = 16
-        right = rect.width() - 16
-        top = 45
-        bottom = rect.height() - 18
-
-        width = right - left
-        height = bottom - top
-
-        if width <= 0 or height <= 0:
-            painter.end()
+        if len(self.values) < 2:
+            painter.setPen(QColor("#64748b"))
+            painter.drawText(
+                rect,
+                Qt.AlignmentFlag.AlignCenter,
+                "Collecting performance data...",
+            )
             return
 
-        # Horizontal grid lines.
-        painter.setPen(QPen(QColor("#263447"), 1))
+        width = rect.width()
+        height = rect.height()
 
-        for index in range(5):
-            y = top + height * index / 4
-
-            painter.drawLine(
-                int(left),
-                int(y),
-                int(right),
-                int(y),
-            )
-
-        # Convert readings into graph coordinates.
+        maximum = max(max(self.values), 1.0)
         points = []
 
         for index, value in enumerate(self.values):
-            x = left + (
+            x = rect.left() + (
                 index / (len(self.values) - 1)
             ) * width
 
-            y = bottom - (value / 100.0) * height
+            y = rect.bottom() - (
+                value / maximum
+            ) * height
 
-            points.append((x, y))
+            points.append(QPointF(x, y))
 
-        # Draw the graph line.
+        # Baseline
+        painter.setPen(QPen(QColor("#263449"), 1))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+        # Filled area
+        area = QPainterPath()
+        area.moveTo(points[0])
+
+        for point in points[1:]:
+            area.lineTo(point)
+
+        area.lineTo(QPointF(points[-1].x(), rect.bottom()))
+        area.lineTo(QPointF(points[0].x(), rect.bottom()))
+        area.closeSubpath()
+
+        painter.fillPath(area, QColor(59, 130, 246, 35))
+
+        # Performance line
+        line = QPainterPath()
+        line.moveTo(points[0])
+
+        for point in points[1:]:
+            line.lineTo(point)
+
         painter.setPen(
             QPen(
-                self.colour,
+                QColor("#60a5fa"),
                 2,
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.RoundCap,
                 Qt.PenJoinStyle.RoundJoin,
             )
         )
-
-        for index in range(1, len(points)):
-            x1, y1 = points[index - 1]
-            x2, y2 = points[index]
-
-            painter.drawLine(
-                int(x1),
-                int(y1),
-                int(x2),
-                int(y2),
-            )
-
-        painter.end()
+        painter.drawPath(line)
 
 
-# =========================================================
-# SYSTEM MONITOR WINDOW
-# =========================================================
+# ---------------------------------------------------------
+# Individual metric card
+# ---------------------------------------------------------
 
-class SystemMonitorView(QWidget):
-    """Main graphical system monitoring interface."""
-
-    def __init__(self, parent=None):
+class MetricCard(QFrame):
+    def __init__(self, title, accent="#60a5fa", parent=None):
         super().__init__(parent)
 
-        self.setWindowTitle("Windows Glance - System Monitor")
-        self.resize(900, 680)
+        self.setObjectName("metricCard")
+        self.accent = accent
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+
+        self.title_label = QLabel(title.upper())
+        self.title_label.setObjectName("cardTitle")
+
+        self.status_label = QLabel("LIVE")
+        self.status_label.setObjectName("liveLabel")
+
+        header.addWidget(self.title_label)
+        header.addStretch()
+        header.addWidget(self.status_label)
+
+        layout.addLayout(header)
+
+        self.value_label = QLabel("--")
+        self.value_label.setObjectName("metricValue")
+
+        self.detail_label = QLabel("Waiting for data")
+        self.detail_label.setObjectName("metricDetail")
+
+        layout.addWidget(self.value_label)
+        layout.addWidget(self.detail_label)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(6)
+        self.progress.setStyleSheet(
+            f"""
+            QProgressBar {{
+                background: #263449;
+                border: none;
+                border-radius: 3px;
+            }}
+            QProgressBar::chunk {{
+                background: {accent};
+                border-radius: 3px;
+            }}
+            """
+        )
+
+        layout.addWidget(self.progress)
+
+        self.chart = HistoryChart()
+        layout.addWidget(self.chart)
+
+    def update_metric(self, value, detail, percentage=None):
+        self.value_label.setText(value)
+        self.detail_label.setText(detail)
+
+        if percentage is not None:
+            self.progress.setValue(
+                max(0, min(100, int(percentage)))
+            )
+        else:
+            self.progress.setValue(0)
+
+        self.chart.add_value(
+            percentage if percentage is not None else 0
+        )
+
+
+# ---------------------------------------------------------
+# Main system monitoring window
+# ---------------------------------------------------------
+
+class SystemMonitorView(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("Windows Glance | System Statistics")
+        self.resize(1050, 760)
+        self.setMinimumSize(780, 600)
 
         self.thread = None
         self.worker = None
-        self._closing = False
+        self.closing = False
 
         self.build_interface()
         self.start_monitoring()
 
-    # -----------------------------------------------------
-    # INTERFACE CONSTRUCTION
-    # -----------------------------------------------------
-
     def build_interface(self):
-        self.setStyleSheet(f"""
-            QWidget {{
-                background-color: {BACKGROUND};
-                color: {PRIMARY_TEXT};
-                font-family: "Segoe UI";
-            }}
+        central = QWidget()
+        self.setCentralWidget(central)
 
-            QLabel {{
-                background: transparent;
-            }}
-        """)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(30, 26, 30, 26)
+        root.setSpacing(20)
 
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(24, 22, 24, 22)
-        main_layout.setSpacing(18)
+        # Header
+        header = QHBoxLayout()
 
-        # Header.
-        header_layout = QHBoxLayout()
+        heading = QVBoxLayout()
 
-        title = QLabel("System Monitor")
-        title.setStyleSheet(
-            f"font-size: 25px; "
-            f"font-weight: 700; "
-            f"color: {PRIMARY_TEXT};"
-        )
-
-        self.status_label = QLabel("INITIALISING")
-        self.status_label.setStyleSheet(
-            f"color: {ORANGE}; "
-            "font-size: 11px; font-weight: 600;"
-        )
-
-        header_layout.addWidget(title)
-        header_layout.addStretch()
-        header_layout.addWidget(self.status_label)
-
-        main_layout.addLayout(header_layout)
+        title = QLabel("System Statistics")
+        title.setObjectName("pageTitle")
 
         subtitle = QLabel(
-            "Real-time performance and resource utilisation"
+            "Real-time performance and resource monitoring"
         )
-        subtitle.setStyleSheet(
-            f"color: {SECONDARY_TEXT}; font-size: 12px;"
-        )
+        subtitle.setObjectName("subtitle")
 
-        main_layout.addWidget(subtitle)
+        heading.addWidget(title)
+        heading.addWidget(subtitle)
 
-        # Metric cards.
-        cards_layout = QGridLayout()
-        cards_layout.setSpacing(14)
+        self.connection_label = QLabel("INITIALISING")
+        self.connection_label.setObjectName("connectionLabel")
 
-        self.cpu_card = MetricCard(
-            "CPU UTILISATION",
-            ACCENT,
-        )
+        header.addLayout(heading)
+        header.addStretch()
+        header.addWidget(self.connection_label)
 
-        self.memory_card = MetricCard(
-            "MEMORY UTILISATION",
-            BLUE,
-        )
+        root.addLayout(header)
 
-        self.disk_card = MetricCard(
-            "DISK UTILISATION",
-            GREEN,
-        )
+        # Summary
+        summary = QHBoxLayout()
+        summary.setSpacing(12)
 
-        self.network_card = MetricCard(
-            "NETWORK ACTIVITY",
-            ORANGE,
-        )
+        self.cpu_summary = self.create_summary("PROCESSOR", "--")
+        self.ram_summary = self.create_summary("MEMORY", "--")
+        self.disk_summary = self.create_summary("STORAGE", "--")
 
-        cards_layout.addWidget(self.cpu_card, 0, 0)
-        cards_layout.addWidget(self.memory_card, 0, 1)
-        cards_layout.addWidget(self.disk_card, 1, 0)
-        cards_layout.addWidget(self.network_card, 1, 1)
+        summary.addWidget(self.cpu_summary)
+        summary.addWidget(self.ram_summary)
+        summary.addWidget(self.disk_summary)
 
-        main_layout.addLayout(cards_layout)
+        root.addLayout(summary)
 
-        # History graphs.
-        graphs_layout = QGridLayout()
-        graphs_layout.setSpacing(14)
+        # Metric cards
+        grid = QGridLayout()
+        grid.setSpacing(16)
 
-        self.cpu_graph = LiveGraph(
-            "CPU HISTORY",
-            ACCENT,
-        )
+        self.cpu_card = MetricCard("Processor", "#60a5fa")
+        self.memory_card = MetricCard("Memory", "#a78bfa")
+        self.disk_card = MetricCard("Storage", "#34d399")
+        self.network_card = MetricCard("Network", "#fbbf24")
 
-        self.memory_graph = LiveGraph(
-            "MEMORY HISTORY",
-            BLUE,
-        )
+        grid.addWidget(self.cpu_card, 0, 0)
+        grid.addWidget(self.memory_card, 0, 1)
+        grid.addWidget(self.disk_card, 1, 0)
+        grid.addWidget(self.network_card, 1, 1)
 
-        graphs_layout.addWidget(self.cpu_graph, 0, 0)
-        graphs_layout.addWidget(self.memory_graph, 0, 1)
-
-        main_layout.addLayout(graphs_layout)
-
-        # Live activity panel.
-        activity_frame = QFrame()
-        activity_frame.setObjectName("ActivityFrame")
-
-        activity_layout = QVBoxLayout(activity_frame)
-        activity_layout.setContentsMargins(16, 14, 16, 14)
-        activity_layout.setSpacing(10)
-
-        activity_title = QLabel("LIVE ACTIVITY")
-        activity_title.setStyleSheet(
-            f"color: {SECONDARY_TEXT}; "
-            "font-size: 11px; font-weight: 600;"
-        )
-
-        self.disk_activity_label = QLabel(
-            "Disk Read: 0 B/s    |    Disk Write: 0 B/s"
-        )
-
-        self.network_activity_label = QLabel(
-            "Download: 0 B/s    |    Upload: 0 B/s"
-        )
-
-        for label in (
-            self.disk_activity_label,
-            self.network_activity_label,
-        ):
-            label.setStyleSheet(
-                f"color: {PRIMARY_TEXT}; font-size: 12px;"
-            )
-
-        activity_layout.addWidget(activity_title)
-        activity_layout.addWidget(self.disk_activity_label)
-        activity_layout.addWidget(self.network_activity_label)
-
-        activity_frame.setStyleSheet(f"""
-            QFrame#ActivityFrame {{
-                background-color: {CARD_BACKGROUND};
-                border: 1px solid {CARD_BORDER};
-                border-radius: 12px;
-            }}
-        """)
-
-        main_layout.addWidget(activity_frame)
-        main_layout.addStretch()
+        root.addLayout(grid, 1)
 
         footer = QLabel(
-            "WINDOWS GLANCE  |  PERFORMANCE MONITOR"
+            "WINDOWS GLANCE  •  LIVE SYSTEM MONITORING  •  "
+            "REFRESH INTERVAL: 1 SECOND"
+        )
+        footer.setObjectName("footer")
+
+        root.addWidget(footer)
+
+        self.setStyleSheet(
+            """
+            QMainWindow, QWidget {
+                background: #0b1220;
+                color: #e5e7eb;
+                font-family: "Segoe UI";
+            }
+
+            QLabel#pageTitle {
+                font-size: 27px;
+                font-weight: 700;
+                color: #f8fafc;
+            }
+
+            QLabel#subtitle {
+                font-size: 12px;
+                color: #94a3b8;
+                margin-top: 3px;
+            }
+
+            QLabel#connectionLabel {
+                color: #34d399;
+                background: #102c28;
+                border: 1px solid #1c5548;
+                border-radius: 10px;
+                padding: 8px 13px;
+                font-size: 10px;
+                font-weight: 700;
+            }
+
+            QFrame#metricCard {
+                background: #131e30;
+                border: 1px solid #263449;
+                border-radius: 15px;
+            }
+
+            QLabel#cardTitle {
+                color: #94a3b8;
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 1px;
+            }
+
+            QLabel#liveLabel {
+                color: #34d399;
+                font-size: 9px;
+                font-weight: 700;
+            }
+
+            QLabel#metricValue {
+                color: #f8fafc;
+                font-size: 29px;
+                font-weight: 700;
+            }
+
+            QLabel#metricDetail {
+                color: #94a3b8;
+                font-size: 11px;
+            }
+
+            QLabel#summaryCard {
+                background: #131e30;
+                border: 1px solid #263449;
+                border-radius: 10px;
+                padding: 13px;
+            }
+
+            QLabel#summaryTitle {
+                color: #94a3b8;
+                font-size: 9px;
+                font-weight: 700;
+            }
+
+            QLabel#summaryValue {
+                color: #f8fafc;
+                font-size: 19px;
+                font-weight: 700;
+            }
+
+            QLabel#footer {
+                color: #64748b;
+                font-size: 9px;
+                letter-spacing: 1px;
+            }
+            """
         )
 
-        footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer.setStyleSheet(
-            f"color: {SECONDARY_TEXT}; font-size: 10px;"
-        )
+    def create_summary(self, title, value):
+        frame = QFrame()
+        frame.setObjectName("metricCard")
 
-        main_layout.addWidget(footer)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(15, 12, 15, 12)
+        layout.setSpacing(5)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("summaryTitle")
+
+        value_label = QLabel(value)
+        value_label.setObjectName("summaryValue")
+
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+
+        frame.value_label = value_label
+        return frame
 
     # -----------------------------------------------------
-    # WORKER THREAD
+    # Worker thread
     # -----------------------------------------------------
 
     def start_monitoring(self):
-        """Create and start the background monitoring thread."""
-
         self.thread = QThread(self)
         self.worker = SystemMonitorWorker(interval=1000)
 
@@ -414,205 +408,127 @@ class SystemMonitorView(QWidget):
 
         self.thread.started.connect(self.worker.start)
 
-        self.worker.metrics_ready.connect(
-            self.refresh_metrics
-        )
+        self.worker.metrics_ready.connect(self.update_dashboard)
+        self.worker.error_occurred.connect(self.show_error)
 
-        self.worker.error_occurred.connect(
-            self.handle_monitor_error
-        )
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
 
-        self.worker.finished.connect(
-            self.thread.quit
-        )
-
-        self.worker.finished.connect(
-            self.worker.deleteLater
-        )
-
-        self.thread.finished.connect(
-            self.thread.deleteLater
-        )
-
-        self.thread.finished.connect(
-            self.monitoring_stopped
-        )
+        self.thread.finished.connect(self.thread.deleteLater)
 
         self.thread.start()
 
     # -----------------------------------------------------
-    # VALUE FORMATTERS
+    # Live dashboard updates
     # -----------------------------------------------------
 
-    @staticmethod
-    def format_bytes(value):
-        """Convert a byte count into a readable value."""
-
-        value = float(value)
-
-        units = ["B", "KB", "MB", "GB", "TB"]
-
-        for unit in units:
-            if value < 1024:
-                return f"{value:.2f} {unit}"
-
-            value /= 1024
-
-        return f"{value:.2f} PB"
-
-    @staticmethod
-    def format_speed(value):
-        """Format a transfer rate in bytes per second."""
-
-        return (
-            f"{SystemMonitorView.format_bytes(value)}/s"
-        )
-
-    # -----------------------------------------------------
-    # METRIC UPDATES
-    # -----------------------------------------------------
-
-    def refresh_metrics(self, metrics):
-        """Update the interface using a new metrics reading."""
-
+    def update_dashboard(self, metrics):
         cpu = metrics["cpu"]
         memory = metrics["memory"]
         disk = metrics["disk"]
         network = metrics["network"]
 
-        # CPU.
-        cpu_usage = cpu["usage"]
+        cpu_usage = float(cpu["usage"])
+        memory_usage = float(memory["usage"])
+        disk_usage = float(disk["usage"])
 
-        self.cpu_card.update_metric(
-            cpu_usage,
-            "Current processor utilisation",
+        self.cpu_summary.value_label.setText(
+            f"{cpu_usage:.1f}%"
+        )
+        self.ram_summary.value_label.setText(
+            f"{memory_usage:.1f}%"
+        )
+        self.disk_summary.value_label.setText(
+            f"{disk_usage:.1f}%"
         )
 
-        # RAM.
-        memory_usage = memory["usage"]
-
-        memory_detail = (
-            f"{self.format_bytes(memory['used'])} used "
-            f"of {self.format_bytes(memory['total'])}"
+        self.cpu_card.update_metric(
+            f"{cpu_usage:.1f}%",
+            "Current processor utilisation",
+            cpu_usage,
         )
 
         self.memory_card.update_metric(
+            f"{memory_usage:.1f}%",
+            f"{format_bytes(memory['used'])} used of "
+            f"{format_bytes(memory['total'])}",
             memory_usage,
-            memory_detail,
-        )
-
-        # Disk capacity.
-        disk_usage = disk["usage"]
-
-        disk_detail = (
-            f"{self.format_bytes(disk['used'])} used "
-            f"of {self.format_bytes(disk['total'])}"
         )
 
         self.disk_card.update_metric(
+            f"{disk_usage:.1f}%",
+            f"{format_bytes(disk['used'])} used of "
+            f"{format_bytes(disk['total'])}  •  "
+            f"Read {format_speed(disk['read_speed'])}  •  "
+            f"Write {format_speed(disk['write_speed'])}",
             disk_usage,
-            disk_detail,
         )
 
-        # Network activity.
         download = network["download_speed"]
         upload = network["upload_speed"]
 
-        network_total = download + upload
-
-        network_detail = (
-            f"↓ {self.format_speed(download)}"
-            f"    ↑ {self.format_speed(upload)}"
-        )
-
-        # This is only a visual activity indicator.
-        # It does not represent network capacity utilisation.
-        network_level = min(
-            100,
-            int(network_total / (1024 * 1024) * 10),
-        )
-
         self.network_card.update_metric(
-            network_level,
-            network_detail,
-            suffix="",
+            format_speed(download),
+            f"Download  •  {format_speed(download)}",
         )
 
-        # Disk transfer rates.
-        self.disk_activity_label.setText(
-            f"Disk Read: "
-            f"{self.format_speed(disk['read_speed'])}"
-            f"    |    Disk Write: "
-            f"{self.format_speed(disk['write_speed'])}"
+        self.network_card.chart.add_value(
+            min(download / (1024 * 1024) * 100, 100)
         )
 
-        # Network transfer rates.
-        self.network_activity_label.setText(
-            f"Download: {self.format_speed(download)}"
-            f"    |    Upload: {self.format_speed(upload)}"
+        self.network_card.detail_label.setText(
+            f"↓ {format_speed(download)}     "
+            f"↑ {format_speed(upload)}"
         )
 
-        # Update graph histories.
-        self.cpu_graph.add_value(cpu_usage)
-        self.memory_graph.add_value(memory_usage)
+        self.connection_label.setText("● LIVE")
 
-        self.status_label.setText("MONITORING")
-        self.status_label.setStyleSheet(
-            f"color: {GREEN}; "
-            "font-size: 11px; font-weight: 600;"
+    def show_error(self, message):
+        self.connection_label.setText("MONITORING ERROR")
+        self.connection_label.setStyleSheet(
+            "color: #f87171; background: #351b25; "
+            "border: 1px solid #71313e; "
+            "border-radius: 10px; padding: 8px 13px;"
         )
+        self.statusBar().showMessage(message)
 
     # -----------------------------------------------------
-    # ERROR HANDLING
+    # Safe shutdown
     # -----------------------------------------------------
-
-    def handle_monitor_error(self, message):
-        """Display a monitoring error in the status area."""
-
-        self.status_label.setText("MONITORING ERROR")
-        self.status_label.setStyleSheet(
-            f"color: {ORANGE}; "
-            "font-size: 11px; font-weight: 600;"
-        )
-
-        print(f"Windows Glance System Monitor: {message}")
-
-    # -----------------------------------------------------
-    # THREAD SHUTDOWN
-    # -----------------------------------------------------
-
-    def monitoring_stopped(self):
-        """Update the status after the worker has stopped."""
-
-        if self._closing:
-            return
-
-        self.status_label.setText("STOPPED")
-        self.status_label.setStyleSheet(
-            f"color: {SECONDARY_TEXT}; "
-            "font-size: 11px;"
-        )
 
     def closeEvent(self, event):
-        """Request worker shutdown before closing the window."""
-
-        if self.thread is None or not self.thread.isRunning():
+        if self.closing:
             event.accept()
             return
 
-        self._closing = True
+        self.closing = True
 
-        if self.worker is not None:
+        if self.worker is not None and self.thread is not None:
             self.worker.stop_requested.emit()
 
-        # The worker's finished signal tells the thread to quit.
-        # Wait for the thread to finish before destroying the GUI.
-        if self.thread.wait(3000):
-            event.accept()
-        else:
-            self._closing = False
-            event.ignore()
-            print(
-                "Windows Glance: monitoring thread "
-                "has not stopped yet. Close the window again."
-            )
+            if not self.thread.wait(3000):
+                self.thread.quit()
+                self.thread.wait(2000)
+
+        event.accept()
+
+
+# ---------------------------------------------------------
+# Application entry point
+# ---------------------------------------------------------
+
+def main():
+    app = QApplication.instance()
+
+    if app is None:
+        app = QApplication(sys.argv)
+
+    window = SystemMonitorView()
+    window.show()
+
+    if QApplication.instance() is app:
+        sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

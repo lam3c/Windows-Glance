@@ -1,17 +1,5 @@
-import sys
 
-from PySide6.QtWidgets import QApplication
-
-from ui.system_monitor_view import SystemMonitorView
-
-
-def main():
-    app = QApplication(sys.argv)
-
-    window = SystemMonitorView()
-    window.show()
-
-    sys.exit(app.exec())
+from ui.system_monitor_view import main
 
 
 if __name__ == "__main__":
