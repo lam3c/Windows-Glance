@@ -1,10 +1,12 @@
 PySide6
 psutil
 
-# Optional Windows integration for Python 3.9–3.12:
+# Optional Windows integration (Bluetooth, Wi-Fi toggles, media widget)
+
+# Python 3.9 - 3.12:
 # winsdk
 
-# Optional Windows integration for Python 3.13+:
+# Python 3.13+:
 # winrt-runtime
 # winrt-Windows.Foundation
 # winrt-Windows.Foundation.Collections

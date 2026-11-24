@@ -1,14 +1,16 @@
 
 import sys
-
 from PySide6.QtWidgets import QApplication
-from ui.system_monitor_view import SystemMonitorView
+from ui.device_stats import SystemMonitorView
 
-app = QApplication(sys.argv)
 
-window = SystemMonitorView()
-window.setWindowTitle("Windows Glance - System Monitor")
-window.resize(850, 650)
-window.show()
+def main():
+    app = QApplication(sys.argv)
+    window = SystemMonitorView(start_monitoring=True)
+    window.setWindowTitle("Windows Glance - System Monitor")
+    window.show()
+    return app.exec()
 
-sys.exit(app.exec())
+
+if __name__ == "__main__":
+    sys.exit(main())

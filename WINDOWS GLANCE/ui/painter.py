@@ -1,7 +1,7 @@
 ﻿"""
 Windows Glance - UI Painter
 
-Handles visual rendering for the Windows Glance interface.
+Handles all visual rendering for the Windows Glance widget.
 """
 
 import math
@@ -9,45 +9,135 @@ import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (
-    QColor, QBrush, QFont, QFontMetricsF,
-    QLinearGradient, QPainter, QPainterPath,
-    QPen, QPolygonF
+    QBrush,
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPolygonF,
 )
 
-from core.engine import (
-    clamp, fmt_time, ui_font, draw_glyph, draw_text,
-    with_alpha, draw_weather, time_text, date_text,
-    wx_text, contrast,
-    IDLE_H, PILL_H, EXP_W, HOVER_MEDIA_H,
-    MEDIA_Y, TILES_Y, TILE_W, TILE_H, TILE_GAP,
-    R_IDLE, R_COMPACT, R_PANEL, CTRL
+from core.common import (
+    CTRL,
+    EXP_W,
+    HOVER_MEDIA_H,
+    IDLE_H,
+    MEDIA_Y,
+    PILL_H,
+    R_COMPACT,
+    R_IDLE,
+    R_PANEL,
+    STAT_GAP,
+    STAT_H,
+    STAT_W,
+    STATS_Y,
+    TILE_GAP,
+    TILE_H,
+    TILE_W,
+    TILES_Y,
+    clamp,
+    contrast,
+    date_text,
+    draw_glyph,
+    draw_text,
+    draw_weather,
+    fmt_time,
+    format_rate_short,
+    time_text,
+    ui_font,
+    with_alpha,
+    wx_text,
 )
+
+
+_EMPTY_STATS = [
+    ("CPU", "--", 0.0),
+    ("RAM", "--", 0.0),
+    ("DISK", "--", 0.0),
+    ("NET", "--", 0.0),
+]
 
 
 class PainterMixin:
+
+    # ------------------------------------------------------------------ #
+    # Geometry helpers
+    # ------------------------------------------------------------------ #
+
     def vol_rects(self):
         """Mute / volume-down / volume-up buttons (card coordinates)."""
+
         y = MEDIA_Y + 38 if self.media else MEDIA_Y - 4
+
         return {
             "mute": QRectF(EXP_W - 120, y, 32, 32),
             "vdn": QRectF(EXP_W - 84, y, 32, 32),
             "vup": QRectF(EXP_W - 48, y, 32, 32),
         }
 
+    def stat_rect(self, idx):
+        return QRectF(
+            16 + idx * (STAT_W + STAT_GAP),
+            STATS_Y,
+            STAT_W,
+            STAT_H,
+        )
+
+    def stat_cells(self):
+        """Return [(label, value text, bar fraction)] for the stats row."""
+
+        m = self.metrics
+
+        if not m:
+            return list(_EMPTY_STATS)
+
+        try:
+            cpu = float(m["cpu"]["usage"])
+            ram = float(m["memory"]["usage"])
+            disk = float(m["disk"]["usage"])
+            down = float(m["network"]["download_speed"])
+
+        except (KeyError, TypeError, ValueError):
+            return list(_EMPTY_STATS)
+
+        return [
+            ("CPU", f"{cpu:.0f}%", clamp(cpu / 100.0)),
+            ("RAM", f"{ram:.0f}%", clamp(ram / 100.0)),
+            ("DISK", f"{disk:.0f}%", clamp(disk / 100.0)),
+            (
+                "NET",
+                "\u2193" + format_rate_short(down),
+                clamp(down / self.net_peak()),
+            ),
+        ]
+
+    # ------------------------------------------------------------------ #
+    # Main paint routine
+    # ------------------------------------------------------------------ #
+
     def _draw_shadow(self, p, card, r):
         p.setPen(Qt.PenStyle.NoPen)
+
         steps = 9
+
         for i in range(steps - 1, -1, -1):
             grow = i * 1.2
             a = int(self.th.shadow * (1 - i / steps) ** 1.6)
+
             if a <= 0:
                 continue
+
             p.setBrush(QColor(0, 0, 0, a))
+
             rr = card.adjusted(-grow, -grow + 2, grow, grow + 4)
             p.drawRoundedRect(rr, r + grow, r + grow)
 
     def paintEvent(self, _):
         p = QPainter(self)
+
         p.setRenderHints(
             QPainter.RenderHint.Antialiasing
             | QPainter.RenderHint.TextAntialiasing
@@ -65,7 +155,7 @@ class PainterMixin:
             card.height() / 2,
             R_IDLE
             + (R_COMPACT - R_IDLE) * show
-            + (R_PANEL - R_COMPACT) * open_
+            + (R_PANEL - R_COMPACT) * open_,
         )
 
         base = 0.45 + 0.55 * show
@@ -90,16 +180,19 @@ class PainterMixin:
         p.setClipPath(path)
 
         ia = clamp(1 - show * 2.2)
+
         if ia > 0:
             p.setOpacity(ia * 0.9)
             self._paint_idle(p, card)
 
         ca = clamp((show - 0.55) / 0.45) * clamp(1 - open_ * 3.2)
+
         if ca > 0:
             p.setOpacity(ca)
             self._paint_compact(p, card)
 
         ea = clamp((min(open_, wprog) - 0.55) / 0.45)
+
         if ea > 0:
             p.setOpacity(ea)
             p.save()
@@ -109,7 +202,7 @@ class PainterMixin:
 
         p.setClipping(False)
 
-        # Fluent-style border: lighter on top, softer at the bottom
+        # Fluent-style border: lighter on top, softer at the bottom.
         p.setOpacity(base)
 
         grad = QLinearGradient(card.topLeft(), card.bottomLeft())
@@ -123,24 +216,26 @@ class PainterMixin:
         outline.addRoundedRect(
             card.adjusted(0.5, 0.5, -0.5, -0.5),
             r - 0.5,
-            r - 0.5
+            r - 0.5,
         )
 
         p.drawPath(outline)
         p.end()
 
+    # ------------------------------------------------------------------ #
+    # Small drawing helpers
+    # ------------------------------------------------------------------ #
+
     def _draw_battery(self, p, rect, level, plugged):
         th = self.th
 
-        col = th.good if plugged else (
-            th.bad if level <= 20 else th.text
-        )
+        col = th.good if plugged else (th.bad if level <= 20 else th.text)
 
         body = QRectF(
             rect.left(),
             rect.top(),
             rect.width() - 2.5,
-            rect.height()
+            rect.height(),
         )
 
         p.setPen(QPen(with_alpha(col, 210), 1.1))
@@ -149,21 +244,16 @@ class PainterMixin:
         p.drawRoundedRect(
             body.adjusted(0.55, 0.55, -0.55, -0.55),
             2.5,
-            2.5
+            2.5,
         )
 
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(col)
 
         p.drawRoundedRect(
-            QRectF(
-                body.right() + 0.8,
-                rect.center().y() - 2,
-                1.6,
-                4
-            ),
+            QRectF(body.right() + 0.8, rect.center().y() - 2, 1.6, 4),
             0.8,
-            0.8
+            0.8,
         )
 
         inner = body.adjusted(2, 2, -2, -2)
@@ -173,72 +263,51 @@ class PainterMixin:
                 inner.left(),
                 inner.top(),
                 max(1.5, inner.width() * level / 100),
-                inner.height()
+                inner.height(),
             ),
             1.2,
-            1.2
+            1.2,
         )
 
         if plugged:
-            b = body
-
             pts = [
                 (0.56, 0.12),
                 (0.32, 0.56),
                 (0.50, 0.56),
                 (0.44, 0.90),
                 (0.70, 0.42),
-                (0.52, 0.42)
+                (0.52, 0.42),
             ]
 
             poly = QPolygonF([
                 QPointF(
-                    b.left() + x * b.width(),
-                    b.top() + y * b.height()
+                    body.left() + x * body.width(),
+                    body.top() + y * body.height(),
                 )
                 for x, y in pts
             ])
 
-            p.setBrush(
-                QColor(
-                    th.bg.red(),
-                    th.bg.green(),
-                    th.bg.blue()
-                )
-            )
-
+            p.setBrush(QColor(th.bg.red(), th.bg.green(), th.bg.blue()))
             p.drawPolygon(poly)
 
-    def _draw_eq(
-        self,
-        p,
-        x,
-        cy,
-        bar_h=10.0,
-        min_h=4.0,
-        step=4.5,
-        w=2.5
-    ):
+    def _draw_eq(self, p, x, cy, bar_h=10.0, min_h=4.0, step=4.5, w=2.5):
         t = time.perf_counter()
 
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(self.accent)
 
         for i in range(4):
-            h = min_h + bar_h * (
-                0.5 + 0.5 * math.sin(t * 6.5 + i * 1.7)
-            )
+            h = min_h + bar_h * (0.5 + 0.5 * math.sin(t * 6.5 + i * 1.7))
 
             p.drawRoundedRect(
-                QRectF(
-                    x + i * step,
-                    cy - h / 2,
-                    w,
-                    h
-                ),
+                QRectF(x + i * step, cy - h / 2, w, h),
                 w / 2,
-                w / 2
+                w / 2,
             )
+
+    # ------------------------------------------------------------------ #
+    # Idle and compact states
+    # ------------------------------------------------------------------ #
 
     def _paint_idle(self, p, card):
         if self.is_playing():
@@ -249,11 +318,12 @@ class PainterMixin:
                 3.5,
                 2.0,
                 5.0,
-                2.5
+                2.5,
             )
 
     def _status_row(self, p, x0, cy, base):
-        """Draws the status row or measures its width."""
+        """Draw the status row, or just measure its width when p is None."""
+
         th = self.th
 
         f_t = ui_font(12, QFont.Weight.DemiBold)
@@ -276,10 +346,7 @@ class PainterMixin:
             x += 10
 
             if draw:
-                p.fillRect(
-                    QRectF(x, cy - 7, 1, 14),
-                    with_alpha(th.text, 45)
-                )
+                p.fillRect(QRectF(x, cy - 7, 1, 14), with_alpha(th.text, 45))
 
             x += 11
 
@@ -289,7 +356,7 @@ class PainterMixin:
                     self.weather["code"],
                     self.weather["is_day"],
                     QRectF(x, cy - 8, 16, 16),
-                    th.dark
+                    th.dark,
                 )
 
             x += 22
@@ -304,17 +371,12 @@ class PainterMixin:
         x += 10
 
         if draw:
-            p.fillRect(
-                QRectF(x, cy - 7, 1, 14),
-                with_alpha(th.text, 45)
-            )
+            p.fillRect(QRectF(x, cy - 7, 1, 14), with_alpha(th.text, 45))
 
         x += 11
 
         wifi_active = (
-            self.wifi_on
-            if self.wifi_on is not None
-            else self.wifi_connected
+            self.wifi_on if self.wifi_on is not None else self.wifi_connected
         )
 
         if draw:
@@ -323,7 +385,7 @@ class PainterMixin:
                 "\uE701",
                 QRectF(x, cy - 9, 14, 18),
                 14,
-                th.text if wifi_active else th.sub
+                th.text if wifi_active else th.sub,
             )
 
         x += 14 + 10
@@ -334,7 +396,7 @@ class PainterMixin:
                 "\uE702",
                 QRectF(x, cy - 9, 14, 18),
                 14,
-                th.text if self.bt else th.sub
+                th.text if self.bt else th.sub,
             )
 
         x += 14
@@ -347,7 +409,7 @@ class PainterMixin:
                     p,
                     QRectF(x, cy - 5.5, 22, 11),
                     self.battery["percent"],
-                    self.battery["plugged"]
+                    self.battery["plugged"],
                 )
 
             x += 22 + 5
@@ -369,12 +431,7 @@ class PainterMixin:
 
         row_w = self._status_row(None, 0, 0, 0)
 
-        self._status_row(
-            p,
-            card.center().x() - row_w / 2,
-            cy,
-            base
-        )
+        self._status_row(p, card.center().x() - row_w / 2, cy, base)
 
         if self.media:
             self._paint_hover_media(p, card)
@@ -385,33 +442,21 @@ class PainterMixin:
         top = card.top() + PILL_H
 
         p.fillRect(
-            QRectF(
-                card.left() + 12,
-                top - 1,
-                card.width() - 24,
-                1
-            ),
-            with_alpha(th.text, 22)
+            QRectF(card.left() + 12, top - 1, card.width() - 24, 1),
+            with_alpha(th.text, 22),
         )
 
-        art = QRectF(
-            card.left() + 12,
-            top + 6,
-            32,
-            32
-        )
+        art = QRectF(card.left() + 12, top + 6, 32, 32)
 
         path = QPainterPath()
         path.addRoundedRect(art, 5, 5)
 
         if self.art:
             p.save()
-            p.setClipPath(
-                path,
-                Qt.ClipOperation.IntersectClip
-            )
+            p.setClipPath(path, Qt.ClipOperation.IntersectClip)
             p.drawPixmap(art, self.art, self._art_src)
             p.restore()
+
         else:
             p.fillPath(path, th.tile_hover)
             draw_glyph(p, "\uE8D6", art, 15, th.sub)
@@ -425,7 +470,7 @@ class PainterMixin:
             top + 19,
             ui_font(12, QFont.Weight.DemiBold),
             th.text,
-            avail
+            avail,
         )
 
         draw_text(
@@ -435,16 +480,13 @@ class PainterMixin:
             top + 34,
             ui_font(11),
             th.sub,
-            avail
+            avail,
         )
 
         glyphs = {
             "prev": ("\uE892", 13),
-            "play": (
-                "\uE769" if m["playing"] else "\uE768",
-                15
-            ),
-            "next": ("\uE893", 13)
+            "play": ("\uE769" if m["playing"] else "\uE768", 15),
+            "next": ("\uE893", 13),
         }
 
         for name, rel in self.hover_ctrls(card.width()).items():
@@ -459,34 +501,18 @@ class PainterMixin:
             draw_glyph(p, g, rect, px, th.text)
 
         if m["duration"]:
-            frac = clamp(
-                self.cur_pos() / m["duration"]
-            )
+            frac = clamp(self.cur_pos() / m["duration"])
 
             x0 = card.left() + 12
             wd = card.width() - 24
+            y = card.top() + PILL_H + HOVER_MEDIA_H - 4
 
-            y = (
-                card.top()
-                + PILL_H
-                + HOVER_MEDIA_H
-                - 4
-            )
+            p.fillRect(QRectF(x0, y, wd, 2), with_alpha(th.text, 36))
+            p.fillRect(QRectF(x0, y, max(2.0, wd * frac), 2), self.accent)
 
-            p.fillRect(
-                QRectF(x0, y, wd, 2),
-                with_alpha(th.text, 36)
-            )
-
-            p.fillRect(
-                QRectF(
-                    x0,
-                    y,
-                    max(2.0, wd * frac),
-                    2
-                ),
-                self.accent
-            )
+    # ------------------------------------------------------------------ #
+    # Expanded panel
+    # ------------------------------------------------------------------ #
 
     def _paint_weather_strip(self, p):
         th, w = self.th, self.weather
@@ -502,7 +528,7 @@ class PainterMixin:
             EXP_W - 66 - QFontMetricsF(tf).horizontalAdvance(tt),
             38,
             tf,
-            th.text
+            th.text,
         )
 
         draw_text(
@@ -511,7 +537,7 @@ class PainterMixin:
             EXP_W - 16 - QFontMetricsF(df).horizontalAdvance(ds),
             56,
             df,
-            th.sub
+            th.sub,
         )
 
         if w:
@@ -520,7 +546,7 @@ class PainterMixin:
                 w["code"],
                 w["is_day"],
                 QRectF(16, 14, 40, 40),
-                th.dark
+                th.dark,
             )
 
             big = ui_font(26, QFont.Weight.DemiBold)
@@ -536,7 +562,7 @@ class PainterMixin:
                 66 + bw + 8,
                 37,
                 df,
-                th.sub
+                th.sub,
             )
 
             draw_text(
@@ -546,17 +572,11 @@ class PainterMixin:
                 56,
                 ui_font(12),
                 th.sub,
-                200
+                200,
             )
+
         else:
-            draw_text(
-                p,
-                self.wx_msg,
-                16,
-                42,
-                ui_font(12),
-                th.sub
-            )
+            draw_text(p, self.wx_msg, 16, 42, ui_font(12), th.sub)
 
     def _draw_tile(self, p, idx, label, status, active, glyph):
         th = self.th
@@ -565,23 +585,16 @@ class PainterMixin:
             16 + idx * (TILE_W + TILE_GAP),
             TILES_Y,
             TILE_W,
-            TILE_H
+            TILE_H,
         )
 
-        hov = (
-            self.hover_item == ("tile", idx)
-            and idx != 2
-        )
+        hov = self.hover_item == ("tile", idx) and idx != 2
 
         if active:
-            fill = (
-                self.accent.lighter(110)
-                if hov
-                else self.accent
-            )
-
+            fill = self.accent.lighter(110) if hov else self.accent
             fg = contrast(self.accent)
             sub = with_alpha(fg, 205)
+
         else:
             fill = th.tile_hover if hov else th.tile
             fg, sub = th.text, th.sub
@@ -600,39 +613,26 @@ class PainterMixin:
             draw_glyph(
                 p,
                 glyph,
-                QRectF(
-                    rect.left() + 12,
-                    rect.top() + 8,
-                    20,
-                    20
-                ),
+                QRectF(rect.left() + 12, rect.top() + 8, 20, 20),
                 16,
-                fg
+                fg,
             )
+
         elif self.battery:
             self._draw_battery(
                 p,
-                QRectF(
-                    rect.left() + 12,
-                    rect.top() + 12,
-                    26,
-                    13
-                ),
+                QRectF(rect.left() + 12, rect.top() + 12, 26, 13),
                 self.battery["percent"],
-                self.battery["plugged"]
+                self.battery["plugged"],
             )
+
         else:
             draw_glyph(
                 p,
                 "\uE83E",
-                QRectF(
-                    rect.left() + 12,
-                    rect.top() + 8,
-                    20,
-                    20
-                ),
+                QRectF(rect.left() + 12, rect.top() + 8, 20, 20),
                 16,
-                fg
+                fg,
             )
 
         draw_text(
@@ -642,7 +642,7 @@ class PainterMixin:
             rect.top() + 42,
             ui_font(12, QFont.Weight.DemiBold),
             fg,
-            TILE_W - 20
+            TILE_W - 20,
         )
 
         draw_text(
@@ -652,174 +652,102 @@ class PainterMixin:
             rect.top() + 56,
             ui_font(11),
             sub,
-            TILE_W - 20
+            TILE_W - 20,
         )
 
-    def _paint_notifications(self, p):
+    def _paint_stats(self, p):
         th = self.th
 
-        # Header
-        draw_glyph(
-            p,
-            "\uE72B",
-            QRectF(17, 17, 22, 22),
-            16,
-            th.text
-        )
+        if not self.monitor_available:
+            draw_text(
+                p,
+                "System stats unavailable - run: pip install psutil",
+                16,
+                STATS_Y + 32,
+                ui_font(11),
+                th.sub,
+                EXP_W - 32,
+            )
+            return
 
-        draw_text(
-            p,
-            "Notifications",
-            48,
-            31,
-            ui_font(14, QFont.Weight.DemiBold),
-            th.text
-        )
+        if self.metrics is None and self.metrics_error:
+            draw_text(
+                p,
+                self.metrics_error,
+                16,
+                STATS_Y + 32,
+                ui_font(11),
+                th.bad,
+                EXP_W - 32,
+            )
+            return
 
-        # Header buttons
-        buttons = [
-            (QRectF(205, 12, 76, 32), "Read all"),
-            (QRectF(285, 12, 64, 32), "Clear"),
-        ]
+        for idx, (label, value, frac) in enumerate(self.stat_cells()):
+            rect = self.stat_rect(idx)
+            hov = self.hover_item == ("stat", idx)
 
-        for rect, label in buttons:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(th.tile_hover)
-            p.drawRoundedRect(rect, 7, 7)
+            path = QPainterPath()
+            path.addRoundedRect(rect, 6, 6)
+
+            p.fillPath(path, th.tile_hover if hov else th.tile)
+
+            p.setPen(QPen(th.stroke, 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
 
             draw_text(
                 p,
                 label,
-                rect.left() + 5,
-                rect.top() + 20,
+                rect.left() + 10,
+                rect.top() + 16,
                 ui_font(10, QFont.Weight.DemiBold),
-                th.text,
-                rect.width() - 10
-            )
-
-        # Back button
-        back_rect = QRectF(12, 12, 32, 32)
-
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(th.tile_hover)
-        p.drawRoundedRect(back_rect, 7, 7)
-
-        draw_glyph(
-            p,
-            "\uE72B",
-            QRectF(18, 18, 20, 20),
-            14,
-            th.text
-        )
-
-        # Notification list
-        items = self.notifications.get_all()[:4]
-
-        if not items:
-            draw_glyph(
-                p,
-                "\uE7F4",
-                QRectF(154, 83, 52, 52),
-                34,
-                th.sub
+                th.sub,
             )
 
             draw_text(
                 p,
-                "You're all caught up",
-                90,
-                151,
-                ui_font(12, QFont.Weight.DemiBold),
-                th.sub,
-                180
+                value,
+                rect.left() + 10,
+                rect.top() + 35,
+                ui_font(14, QFont.Weight.DemiBold),
+                th.text,
+                STAT_W - 16,
             )
 
-            return
+            track = QRectF(
+                rect.left() + 10,
+                rect.bottom() - 10,
+                STAT_W - 20,
+                4,
+            )
 
-        for i, item in enumerate(items):
-            y = 62 + i * 30
-            rect = QRectF(12, y, 336, 28)
+            tp = QPainterPath()
+            tp.addRoundedRect(track, 2, 2)
+            p.fillPath(tp, with_alpha(th.text, 36))
 
-            # Row background
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(th.tile_hover)
-            p.drawRoundedRect(rect, 6, 6)
-
-            # Unread indicator
-            if item.get("unread", False):
-                p.setBrush(self.accent)
-                p.drawEllipse(
-                    QRectF(19, y + 10, 6, 6)
+            if frac > 0:
+                fp = QPainterPath()
+                fp.addRoundedRect(
+                    QRectF(
+                        track.left(),
+                        track.top(),
+                        max(4.0, track.width() * frac),
+                        4,
+                    ),
+                    2,
+                    2,
                 )
 
-            # Notification title
-            title = str(
-                item.get("title", "Notification")
-            )
+                busy = idx < 3 and frac > 0.9
 
-            message = str(
-                item.get("message", "")
-            ).strip()
-
-            source = str(
-                item.get("source", "Windows Glance")
-            )
-
-            draw_text(
-                p,
-                title,
-                31,
-                y + 12,
-                ui_font(10, QFont.Weight.DemiBold),
-                th.text,
-                270
-            )
-
-            # Source and message preview
-            preview = source
-
-            if message:
-                preview += " · " + message
-
-            draw_text(
-                p,
-                preview,
-                31,
-                y + 24,
-                ui_font(9),
-                th.sub,
-                270
-            )
-
-            # Dismiss control
-            dismiss_rect = QRectF(310, y, 38, 28)
-
-            if self.hover_item == (
-                "notification_dismiss",
-                item["id"]
-            ):
-                p.setBrush(with_alpha(th.text, 25))
-                p.drawRoundedRect(dismiss_rect, 5, 5)
-
-            draw_glyph(
-                p,
-                "\uE711",
-                QRectF(319, y + 5, 18, 18),
-                11,
-                th.sub
-            )
+                p.fillPath(fp, th.bad if busy else self.accent)
 
     def _paint_expanded(self, p):
-        # Show notification centre instead of the normal panel
-        if self.notification_view:
-            self._paint_notifications(p)
-            return
-
         th = self.th
 
         self._paint_weather_strip(p)
 
-        # Notification bell
+        # Notification bell.
         bell_rect = QRectF(EXP_W - 44, 8, 36, 34)
 
         if self.hover_item == ("notifications", None):
@@ -832,25 +760,17 @@ class PainterMixin:
             "\uE7F4",
             QRectF(EXP_W - 48, 12, 24, 24),
             17,
-            th.text
+            th.text,
         )
 
-        # Unread notification badge
         unread = self.notifications.unread_count()
 
         if unread:
-            badge_text = (
-                str(unread)
-                if unread < 10
-                else "9+"
-            )
+            badge_text = str(unread) if unread < 10 else "9+"
 
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(self.accent)
-
-            p.drawEllipse(
-                QRectF(EXP_W - 20, 7, 16, 16)
-            )
+            p.drawEllipse(QRectF(EXP_W - 20, 7, 16, 16))
 
             draw_text(
                 p,
@@ -859,14 +779,10 @@ class PainterMixin:
                 18,
                 ui_font(8, QFont.Weight.Bold),
                 contrast(self.accent),
-                16
+                16,
             )
 
-        bt_text = {
-            True: "On",
-            False: "Off",
-            None: "Unavailable"
-        }[self.bt]
+        bt_text = {True: "On", False: "Off", None: "Unavailable"}[self.bt]
 
         if self.battery:
             b = self.battery
@@ -875,51 +791,30 @@ class PainterMixin:
                 f'{b["percent"]}% · '
                 f'{"Plugged in" if b["plugged"] else "On battery"}'
             )
+
         else:
             batt_text = "No battery"
 
         wifi_active = (
-            self.wifi_on
-            if self.wifi_on is not None
-            else self.wifi_connected
+            self.wifi_on if self.wifi_on is not None else self.wifi_connected
         )
 
-        self._draw_tile(
-            p,
-            0,
-            "Wi-Fi",
-            self.wifi_text,
-            wifi_active,
-            "\uE701"
-        )
+        self._draw_tile(p, 0, "Wi-Fi", self.wifi_text, wifi_active, "\uE701")
+        self._draw_tile(p, 1, "Bluetooth", bt_text, self.bt is True, "\uE702")
+        self._draw_tile(p, 2, "Battery", batt_text, False, None)
 
-        self._draw_tile(
-            p,
-            1,
-            "Bluetooth",
-            bt_text,
-            self.bt is True,
-            "\uE702"
-        )
-
-        self._draw_tile(
-            p,
-            2,
-            "Battery",
-            batt_text,
-            False,
-            None
-        )
+        self._paint_stats(p)
 
         if self.media:
             self._paint_media(p)
+
         else:
             draw_glyph(
                 p,
                 "\uE8D6",
                 QRectF(16, MEDIA_Y - 2, 18, 18),
                 14,
-                th.sub
+                th.sub,
             )
 
             draw_text(
@@ -928,7 +823,7 @@ class PainterMixin:
                 40,
                 MEDIA_Y + 11,
                 ui_font(12),
-                th.sub
+                th.sub,
             )
 
         self._paint_volume(p)
@@ -943,13 +838,8 @@ class PainterMixin:
                 p.fillPath(bp, th.tile_hover)
 
             if name == "mute":
-                draw_glyph(
-                    p,
-                    "\uE74F",
-                    r,
-                    15,
-                    th.text
-                )
+                draw_glyph(p, "\uE74F", r, 15, th.text)
+
             else:
                 p.setFont(ui_font(19))
                 p.setPen(th.text)
@@ -957,7 +847,7 @@ class PainterMixin:
                 p.drawText(
                     r,
                     Qt.AlignmentFlag.AlignCenter,
-                    "\u2212" if name == "vdn" else "+"
+                    "\u2212" if name == "vdn" else "+",
                 )
 
     def _paint_media(self, p):
@@ -970,18 +860,14 @@ class PainterMixin:
 
         if self.art:
             p.save()
-
-            p.setClipPath(
-                path,
-                Qt.ClipOperation.IntersectClip
-            )
-
+            p.setClipPath(path, Qt.ClipOperation.IntersectClip)
             p.drawPixmap(art, self.art, self._art_src)
             p.restore()
 
             p.setPen(QPen(th.stroke, 1))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(path)
+
         else:
             p.fillPath(path, th.tile_hover)
             draw_glyph(p, "\uE8D6", art, 24, th.sub)
@@ -993,7 +879,7 @@ class PainterMixin:
             y0 + 16,
             ui_font(14, QFont.Weight.DemiBold),
             th.text,
-            EXP_W - 108
+            EXP_W - 108,
         )
 
         draw_text(
@@ -1003,16 +889,13 @@ class PainterMixin:
             y0 + 33,
             ui_font(12),
             th.sub,
-            EXP_W - 108
+            EXP_W - 108,
         )
 
         glyphs = {
             "prev": ("\uE892", 14),
-            "play": (
-                "\uE769" if m["playing"] else "\uE768",
-                17
-            ),
-            "next": ("\uE893", 14)
+            "play": ("\uE769" if m["playing"] else "\uE768", 17),
+            "next": ("\uE893", 14),
         }
 
         for name, rect in CTRL.items():
@@ -1028,61 +911,43 @@ class PainterMixin:
             pos = self.cur_pos()
             frac = clamp(pos / m["duration"])
 
-            track = QRectF(
-                16,
-                y0 + 80,
-                EXP_W - 32,
-                4
-            )
+            track = QRectF(16, y0 + 80, EXP_W - 32, 4)
 
             tp = QPainterPath()
             tp.addRoundedRect(track, 2, 2)
-
-            p.fillPath(
-                tp,
-                with_alpha(th.text, 40)
-            )
+            p.fillPath(tp, with_alpha(th.text, 40))
 
             if frac > 0:
                 fp = QPainterPath()
-
                 fp.addRoundedRect(
                     QRectF(
                         track.left(),
                         track.top(),
-                        max(4, track.width() * frac),
-                        4
+                        max(4.0, track.width() * frac),
+                        4,
                     ),
                     2,
-                    2
+                    2,
                 )
 
                 p.fillPath(fp, self.accent)
 
             if self.hover_item == ("seek", None):
-                # Scrub handle on hover
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(self.accent)
 
                 p.drawEllipse(
                     QPointF(
                         track.left() + track.width() * frac,
-                        track.center().y()
+                        track.center().y(),
                     ),
                     5,
-                    5
+                    5,
                 )
 
             f = ui_font(11)
 
-            draw_text(
-                p,
-                fmt_time(pos),
-                16,
-                y0 + 102,
-                f,
-                th.sub
-            )
+            draw_text(p, fmt_time(pos), 16, y0 + 102, f, th.sub)
 
             end = fmt_time(m["duration"])
 
@@ -1092,5 +957,5 @@ class PainterMixin:
                 EXP_W - 16 - QFontMetricsF(f).horizontalAdvance(end),
                 y0 + 102,
                 f,
-                th.sub
+                th.sub,
             )
