@@ -2,8 +2,14 @@
 Windows Glance - voice input and output using native Windows speech.
 
 Speech recognition and text-to-speech each run in a small PowerShell helper
-(System.Speech, built into Windows), so no extra Python packages or API keys
-are needed and everything works offline.
+(System.Speech / SAPI, built into Windows), so no extra Python packages or API
+keys are needed and everything works offline.
+
+Recognition events (one line each):
+    READY | ERROR|msg | HEARD|confidence|text | HYP|partial text
+    REJECT | LEVEL|0-100
+Speech events:
+    VOICE|name | WARN|msg | ERROR|msg | READY | DONE
 """
 
 import os
@@ -12,8 +18,6 @@ import tempfile
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 
 
-# Recognises only the phrases in the grammar. Prints one line per event:
-#   READY    |    ERROR|message    |    HEARD|confidence|text
 STT_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 $parent = __PARENT_PID__
@@ -35,30 +39,63 @@ __PHRASES__
     $builder.Append($choices)
     $engine.LoadGrammar((New-Object System.Speech.Recognition.Grammar($builder)))
     $engine.SetInputToDefaultAudioDevice()
+
+    Register-ObjectEvent -InputObject $engine -EventName SpeechRecognized -SourceIdentifier 'g_heard' | Out-Null
+    Register-ObjectEvent -InputObject $engine -EventName SpeechHypothesized -SourceIdentifier 'g_hyp' | Out-Null
+    Register-ObjectEvent -InputObject $engine -EventName SpeechRecognitionRejected -SourceIdentifier 'g_reject' | Out-Null
+    Register-ObjectEvent -InputObject $engine -EventName AudioLevelUpdated -SourceIdentifier 'g_level' | Out-Null
+
+    $engine.RecognizeAsync([System.Speech.Recognition.RecognizeMode]::Multiple)
     Send 'READY'
 } catch {
     Send ('ERROR|' + $_.Exception.Message)
     exit 1
 }
 
+$lastLevel = -1
+$lastSend = 0
+$lastCheck = [Environment]::TickCount
+
 while ($true) {
-    if (-not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { exit 0 }
+    if (([Environment]::TickCount - $lastCheck) -gt 2000) {
+        $lastCheck = [Environment]::TickCount
+        if (-not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { exit 0 }
+    }
 
-    try {
-        $result = $engine.Recognize([TimeSpan]::FromSeconds(2))
+    $events = @(Wait-Event -Timeout 1)
 
-        if ($result -ne $null) {
-            Send ('HEARD|' + [math]::Round($result.Confidence, 2) + '|' + $result.Text)
-        }
-    } catch {
-        Send ('ERROR|' + $_.Exception.Message)
-        Start-Sleep -Seconds 2
+    foreach ($ev in $events) {
+        try {
+            switch ($ev.SourceIdentifier) {
+                'g_heard' {
+                    $r = $ev.SourceEventArgs.Result
+                    Send ('HEARD|' + [math]::Round($r.Confidence, 2) + '|' + $r.Text)
+                }
+                'g_hyp' {
+                    Send ('HYP|' + $ev.SourceEventArgs.Result.Text)
+                }
+                'g_reject' {
+                    Send 'REJECT'
+                }
+                'g_level' {
+                    $level = [int]$ev.SourceEventArgs.AudioLevel
+                    $tick = [Environment]::TickCount
+
+                    if ((($tick - $lastSend) -ge 70) -and ($level -ne $lastLevel)) {
+                        Send ('LEVEL|' + $level)
+                        $lastLevel = $level
+                        $lastSend = $tick
+                    }
+                }
+            }
+        } catch { }
+
+        Remove-Event -EventIdentifier $ev.EventIdentifier -ErrorAction SilentlyContinue
     }
 }
 """
 
 
-# Reads one line of text per utterance from stdin, speaks it, replies DONE.
 TTS_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 
@@ -67,9 +104,18 @@ function Send($text) {
     [Console]::Out.Flush()
 }
 
+$mode = 'net'
+$synth = $null
+$sapi = $null
+
 try {
     Add-Type -AssemblyName System.Speech
     $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+    $synth.SetOutputToDefaultAudioDevice()
+
+    $installed = @($synth.GetInstalledVoices() | Where-Object { $_.Enabled })
+    if ($installed.Count -eq 0) { throw 'No Windows voices are installed' }
+
     $picked = $false
 
     try {
@@ -87,11 +133,21 @@ try {
 
     $synth.Rate = 0
     $synth.Volume = 100
-    Send 'READY'
+    Send ('VOICE|' + $synth.Voice.Name)
 } catch {
-    Send ('ERROR|' + $_.Exception.Message)
-    exit 1
+    Send ('WARN|System.Speech unavailable (' + $_.Exception.Message + '), trying SAPI')
+
+    try {
+        $sapi = New-Object -ComObject SAPI.SpVoice
+        $mode = 'sapi'
+        Send ('VOICE|' + $sapi.Voice.GetDescription())
+    } catch {
+        Send ('ERROR|No Windows speech voice available: ' + $_.Exception.Message)
+        exit 1
+    }
 }
+
+Send 'READY'
 
 while ($true) {
     $line = [Console]::In.ReadLine()
@@ -99,7 +155,12 @@ while ($true) {
     if ($line -eq $null) { exit 0 }
     if ($line.Trim().Length -eq 0) { continue }
 
-    try { $synth.Speak($line) } catch { }
+    try {
+        if ($mode -eq 'net') { $synth.Speak($line) } else { [void]$sapi.Speak($line) }
+    } catch {
+        Send ('ERROR|Speech failed: ' + $_.Exception.Message)
+    }
+
     Send 'DONE'
 }
 """
@@ -108,9 +169,12 @@ while ($true) {
 class VoiceIO(QObject):
     """Owns the speech-recognition and speech-synthesis helper processes."""
 
-    heard = Signal(str, float)    # recognised text, confidence 0..1
-    speech_done = Signal()        # everything queued has been spoken
-    status = Signal(str, bool)    # message, is_error
+    heard = Signal(str, float)     # recognised text, confidence 0..1
+    hypothesis = Signal(str)       # partial text while the user is speaking
+    level = Signal(int)            # microphone level 0..100
+    rejected = Signal()            # speech heard but not understood
+    speech_done = Signal()         # everything queued has been spoken
+    status = Signal(str, bool)     # message, is_error
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -122,6 +186,7 @@ class VoiceIO(QObject):
         self.tts_failed = False
         self.speaking = False
 
+        self._tts_path = ""
         self._pending = 0
         self._outbox = []
         self._stt_buf = ""
@@ -135,7 +200,7 @@ class VoiceIO(QObject):
     def start(self, phrases):
         folder = tempfile.gettempdir()
         stt_path = os.path.join(folder, "windows_glance_stt.ps1")
-        tts_path = os.path.join(folder, "windows_glance_tts.ps1")
+        self._tts_path = os.path.join(folder, "windows_glance_tts.ps1")
 
         clean = []
 
@@ -158,7 +223,7 @@ class VoiceIO(QObject):
             with open(stt_path, "w", encoding="ascii") as f:
                 f.write(stt_script)
 
-            with open(tts_path, "w", encoding="ascii") as f:
+            with open(self._tts_path, "w", encoding="ascii") as f:
                 f.write(TTS_SCRIPT)
 
         except OSError as exc:
@@ -169,17 +234,24 @@ class VoiceIO(QObject):
             )
             return
 
-        self.tts = self._launch(
-            tts_path,
-            self._read_tts,
-            self._tts_finished,
-            self._flush,
-        )
+        self._start_tts()
 
         self.stt = self._launch(
             stt_path,
             self._read_stt,
             self._stt_finished,
+        )
+
+    def _start_tts(self):
+        self._tts_buf = ""
+        self.tts_failed = False
+        self.tts_ready = False
+
+        self.tts = self._launch(
+            self._tts_path,
+            self._read_tts,
+            self._tts_finished,
+            self._flush,
         )
 
     def _launch(self, path, on_output, on_finished, on_started=None):
@@ -235,6 +307,22 @@ class VoiceIO(QObject):
         if not line:
             return
 
+        if line.startswith("LEVEL|"):
+            try:
+                self.level.emit(int(line[6:]))
+            except ValueError:
+                pass
+
+            return
+
+        if line.startswith("HYP|"):
+            self.hypothesis.emit(line[4:].strip())
+            return
+
+        if line == "REJECT":
+            self.rejected.emit()
+            return
+
         if line == "READY":
             self.stt_ready = True
             self.status.emit("Voice recognition ready", False)
@@ -288,6 +376,27 @@ class VoiceIO(QObject):
         self._outbox.append(text)
         self._flush()
 
+    def stop_speaking(self):
+        """Cut off speech immediately (restarts the speech helper)."""
+
+        self._outbox.clear()
+        self._pending = 0
+        self.speaking = False
+
+        proc = self.tts
+
+        if proc is not None:
+            proc.blockSignals(True)
+
+            if proc.state() != QProcess.ProcessState.NotRunning:
+                proc.kill()
+                proc.waitForFinished(500)
+
+            proc.deleteLater()
+
+        if not self._closing and self._tts_path:
+            self._start_tts()
+
     def _flush(self):
         if self.tts is None:
             return
@@ -312,6 +421,12 @@ class VoiceIO(QObject):
 
             elif line == "DONE":
                 self._finish_one()
+
+            elif line.startswith("VOICE|"):
+                self.status.emit("Using voice: " + line[6:], False)
+
+            elif line.startswith("WARN|"):
+                self.status.emit(line[5:], False)
 
             elif line.startswith("ERROR|"):
                 self.status.emit("Voice error: " + line[6:], True)

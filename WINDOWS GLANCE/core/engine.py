@@ -14,21 +14,24 @@ Python 3.13+ (winsdk has no wheels there), use the modular winrt packages:
 States
     idle      : tiny see-through sliver at the top of the screen (click-through).
     hover     : cursor over it -> compact pill: clock, weather, Wi-Fi, Bluetooth,
-                battery. A mini media player appears when music is playing.
+                battery and a microphone button. A mini media player appears
+                when music is playing.
     expanded  : click the pill -> full panel: weather + clock, Wi-Fi / Bluetooth
-                toggles, battery, CPU / RAM / DISK / NET stats, media player
-                and volume buttons.
+                toggles, battery, CPU / RAM / DISK / NET stats, media player,
+                volume buttons and the microphone button.
     stats     : click any stat cell -> the panel switches to a live performance
                 view (CPU, memory, storage, network) with graphs. The back
                 arrow returns to the panel.
 
 Live activities (the pill pops out by itself)
     charging  : plug in or unplug the charger.
-    assistant : say "Glance", then a command. Say "Glance, help" for the list.
+    assistant : say "Glance" or press the microphone button, then a command.
+                Say "Glance, help" for the list.
 
 Controls
     Wi-Fi / Bluetooth tiles : click = toggle.  Right-click = Windows Settings.
     Stats row               : click = open the performance view.
+    Microphone button       : click = start listening, click again = stop.
     Bell                    : opens the notification popup.
     Right-click (elsewhere) : menu (position, weather, run at startup, exit).
 """
@@ -73,7 +76,7 @@ from ui.context_menu import ContextMenuController
 from ui.notification_popup import NotificationPopup
 from ui.painter import PainterMixin
 from ui.charging import ChargingMixin
-from ui.assistant_view import AssistantMixin
+from ui.assistant_view import MIC_SLOT, AssistantMixin
 
 from ui.stats_view import (
     STATS_BACK,
@@ -155,7 +158,7 @@ class WindowsGlance(
         self._art_src = QRectF()
         self._ignore_play_until = 0.0
 
-        # Performance stats.
+        # Performance statsistics.
         self.monitor_available = MONITOR_AVAILABLE
         self.monitor_thread = None
         self.monitor_worker = None
@@ -166,7 +169,7 @@ class WindowsGlance(
         self.disk_history = deque(maxlen=STATS_HISTORY)
         self.net_history = deque(maxlen=STATS_HISTORY)
 
-        # Theme.
+        # Theme.(overall)
         self.dark = system_uses_dark()
         self.th = make_theme(self.dark)
         self.accent = system_accent(self.dark)
@@ -357,7 +360,10 @@ class WindowsGlance(
 
     def showEvent(self, event):
         super().showEvent(event)
-        set_click_through(self, self.state == "idle")
+        set_click_through(
+            self,
+            self.state == "idle" and not self.assistant_active,
+        )
 
     def check_fullscreen(self):
         busy = fullscreen_app_running()
@@ -427,7 +433,7 @@ class WindowsGlance(
         return EXP_H_MEDIA if self.media else EXP_H_BASE
 
     def compact_width(self):
-        return 32 + self._status_row(None, 0, 0, 0)
+        return 32 + MIC_SLOT + self._status_row(None, 0, 0, 0)
 
     def target_size(self):
         if self.assistant_active and self.state != "expanded":
@@ -520,7 +526,10 @@ class WindowsGlance(
             self.notification_view = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
 
-        set_click_through(self, state == "idle")
+        set_click_through(
+            self,
+            state == "idle" and not self.assistant_active,
+        )
 
         self._sync_tick()
         self.retarget()
@@ -739,6 +748,12 @@ class WindowsGlance(
         }
 
     def hit(self, rel):
+        # Microphone button (hover pill, expanded panel, assistant pill).
+        mic = self.mic_rect()
+
+        if mic is not None and mic.contains(rel):
+            return ("mic", None)
+
         if self.state == "hover":
             if self.media:
                 for name, rect in self.hover_ctrls(
@@ -832,6 +847,11 @@ class WindowsGlance(
             return
 
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        # Microphone button works in every state.
+        if item == ("mic", None):
+            self.toggle_listening()
             return
 
         if self.state == "hover":
