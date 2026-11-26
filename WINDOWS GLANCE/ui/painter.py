@@ -50,6 +50,14 @@ from core.common import (
     ui_font,
     with_alpha,
     wx_text,
+    STATS_BACK,
+    STATS_CARD_GAP,
+    STATS_CARD_H,
+    STATS_CARD_W,
+    STATS_HISTORY,
+    STATS_TASKMGR,
+    STATS_VIEW_TOP,
+    format_bytes,
 )
 
 
@@ -62,6 +70,262 @@ _EMPTY_STATS = [
 
 
 class PainterMixin:
+
+    # ------------------------------------------------------------------ #
+    # Performance view (drawn inside the pill)
+    # ------------------------------------------------------------------ #
+
+    STAT_COLORS = ("#55A6FF", "#A78BFA", "#F5A65B", "#42D6A4")
+
+    def stats_card_rect(self, idx):
+        col, row = idx % 2, idx // 2
+
+        return QRectF(
+            16 + col * (STATS_CARD_W + STATS_CARD_GAP),
+            STATS_VIEW_TOP + row * (STATS_CARD_H + STATS_CARD_GAP),
+            STATS_CARD_W,
+            STATS_CARD_H,
+        )
+
+    def _stats_card_data(self):
+        """Return [label, value, detail, history, peak, colour] per card."""
+
+        colors = [QColor(c) for c in self.STAT_COLORS]
+        m = self.metrics
+
+        cards = [
+            ["PROCESSOR", "--", "Waiting for data...",
+             self.cpu_history, 100.0],
+            ["MEMORY", "--", "Waiting for data...",
+             self.mem_history, 100.0],
+            ["STORAGE", "--", "Waiting for data...",
+             self.disk_history,
+             max(max(self.disk_history, default=0.0), 1024 * 1024.0)],
+            ["NETWORK", "--", "Waiting for data...",
+             self.net_history, self.net_peak()],
+        ]
+
+        if m:
+            try:
+                cpu = float(m["cpu"]["usage"])
+                mem = m["memory"]
+                disk = m["disk"]
+                net = m["network"]
+
+                cards[0][1:3] = [f"{cpu:.0f}%", "Processor load"]
+
+                cards[1][1:3] = [
+                    f"{float(mem['usage']):.0f}%",
+                    f"{format_bytes(mem['used'])} of "
+                    f"{format_bytes(mem['total'])}",
+                ]
+
+                cards[2][1:3] = [
+                    f"{float(disk['usage']):.0f}%",
+                    f"R {format_rate_short(disk['read_speed'])}/s  "
+                    f"W {format_rate_short(disk['write_speed'])}/s",
+                ]
+
+                cards[3][1:3] = [
+                    f"{format_bytes(net['download_speed'])}/s",
+                    f"Upload {format_bytes(net['upload_speed'])}/s",
+                ]
+
+            except (KeyError, TypeError, ValueError):
+                pass
+
+        for card, color in zip(cards, colors):
+            card.append(color)
+
+        return cards
+
+    def _draw_chart(self, p, rect, values, color, peak):
+        """Filled live line chart, growing in from the right edge."""
+
+        p.save()
+        p.setClipRect(rect, Qt.ClipOperation.IntersectClip)
+
+        p.setPen(QPen(with_alpha(self.th.text, 22), 1))
+        mid = rect.top() + rect.height() / 2
+
+        p.drawLine(QPointF(rect.left(), mid), QPointF(rect.right(), mid))
+
+        pts = list(values)
+
+        if len(pts) >= 2:
+            peak = max(float(peak), 1e-9)
+            step = rect.width() / (STATS_HISTORY - 1)
+            n = len(pts)
+
+            points = []
+
+            for i, v in enumerate(pts):
+                x = rect.right() - (n - 1 - i) * step
+                y = (
+                    rect.bottom() - 2
+                    - clamp(v / peak) * (rect.height() - 4)
+                )
+                points.append(QPointF(x, y))
+
+            area = QPainterPath()
+            area.moveTo(points[0].x(), rect.bottom())
+
+            for pt in points:
+                area.lineTo(pt)
+
+            area.lineTo(points[-1].x(), rect.bottom())
+            area.closeSubpath()
+
+            p.fillPath(area, with_alpha(color, 40))
+
+            line = QPainterPath()
+            line.moveTo(points[0])
+
+            for pt in points[1:]:
+                line.lineTo(pt)
+
+            pen = QPen(color, 1.6)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(line)
+
+        p.restore()
+
+    def _paint_stats_view(self, p):
+        th = self.th
+
+        # Back button.
+        back = STATS_BACK
+        hov = self.hover_item == ("stats_back", None)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(th.tile_hover if hov else th.tile)
+        p.drawRoundedRect(back, 7, 7)
+
+        draw_glyph(
+            p,
+            "\uE72B",
+            QRectF(back.left() + 6, back.top() + 6, 20, 20),
+            14,
+            th.text,
+        )
+
+        draw_text(
+            p,
+            "System Performance",
+            52,
+            33,
+            ui_font(14, QFont.Weight.DemiBold),
+            th.text,
+        )
+
+        # Task Manager shortcut.
+        tm = STATS_TASKMGR
+        hov = self.hover_item == ("stats_taskmgr", None)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(th.tile_hover if hov else th.tile)
+        p.drawRoundedRect(tm, 7, 7)
+
+        draw_text(
+            p,
+            "Task Manager",
+            tm.left() + 10,
+            tm.top() + 18,
+            ui_font(10, QFont.Weight.DemiBold),
+            th.text,
+            tm.width() - 16,
+        )
+
+        if not self.monitor_available:
+            draw_text(
+                p,
+                "System stats unavailable - run: pip install psutil",
+                16,
+                96,
+                ui_font(11),
+                th.sub,
+                EXP_W - 32,
+            )
+            return
+
+        if self.metrics is None and self.metrics_error:
+            draw_text(
+                p,
+                self.metrics_error,
+                16,
+                96,
+                ui_font(11),
+                th.bad,
+                EXP_W - 32,
+            )
+            return
+
+        for idx, card in enumerate(self._stats_card_data()):
+            label, value, detail, history, peak, color = card
+            rect = self.stats_card_rect(idx)
+
+            path = QPainterPath()
+            path.addRoundedRect(rect, 8, 8)
+
+            p.fillPath(path, th.tile)
+
+            p.setPen(QPen(th.stroke, 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawEllipse(
+                QPointF(rect.left() + 16, rect.top() + 16),
+                3,
+                3,
+            )
+
+            draw_text(
+                p,
+                label,
+                rect.left() + 26,
+                rect.top() + 20,
+                ui_font(10, QFont.Weight.DemiBold),
+                th.sub,
+            )
+
+            draw_text(
+                p,
+                value,
+                rect.left() + 12,
+                rect.top() + 46,
+                ui_font(18, QFont.Weight.DemiBold),
+                th.text,
+                rect.width() - 24,
+            )
+
+            draw_text(
+                p,
+                detail,
+                rect.left() + 12,
+                rect.top() + 62,
+                ui_font(10),
+                th.sub,
+                rect.width() - 24,
+            )
+
+            self._draw_chart(
+                p,
+                QRectF(
+                    rect.left() + 12,
+                    rect.top() + 70,
+                    rect.width() - 24,
+                    28,
+                ),
+                history,
+                color,
+                peak,
+            )
 
     # ------------------------------------------------------------------ #
     # Geometry helpers
@@ -743,6 +1007,8 @@ class PainterMixin:
                 p.fillPath(fp, th.bad if busy else self.accent)
 
     def _paint_expanded(self, p):
+        if self.stats_view:
+            self._paint_statsa_view(p)
         th = self.th
 
         self._paint_weather_strip(p)

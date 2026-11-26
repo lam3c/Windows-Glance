@@ -1,6 +1,6 @@
 """
 Windows Glance - a Windows 11 style status pill with weather, quick toggles,
-live system stats and a media widget.
+live system stats, a media widget and a built-in voice assistant.
 
 Install (Python 3.9 - 3.12):
     pip install PySide6 psutil winsdk
@@ -18,10 +18,17 @@ States
     expanded  : click the pill -> full panel: weather + clock, Wi-Fi / Bluetooth
                 toggles, battery, CPU / RAM / DISK / NET stats, media player
                 and volume buttons.
+    stats     : click any stat cell -> the panel switches to a live performance
+                view (CPU, memory, storage, network) with graphs. The back
+                arrow returns to the panel.
+
+Live activities (the pill pops out by itself)
+    charging  : plug in or unplug the charger.
+    assistant : say "Glance", then a command. Say "Glance, help" for the list.
 
 Controls
     Wi-Fi / Bluetooth tiles : click = toggle.  Right-click = Windows Settings.
-    Stats row               : click = open Task Manager.
+    Stats row               : click = open the performance view.
     Bell                    : opens the notification popup.
     Right-click (elsewhere) : menu (position, weather, run at startup, exit).
 """
@@ -65,6 +72,16 @@ from core.notification_store import NotificationStore
 from ui.context_menu import ContextMenuController
 from ui.notification_popup import NotificationPopup
 from ui.painter import PainterMixin
+from ui.charging import ChargingMixin
+from ui.assistant_view import AssistantMixin
+
+from ui.stats_view import (
+    STATS_BACK,
+    STATS_HISTORY,
+    STATS_TASKMGR,
+    STATS_VIEW_H,
+    StatsViewMixin,
+)
 
 
 WINRT = _WINRT_MODULES is not None
@@ -74,7 +91,13 @@ WINRT = _WINRT_MODULES is not None
 # Main widget
 # --------------------------------------------------------------------------- #
 
-class WindowsGlance(PainterMixin, QWidget):
+class WindowsGlance(
+    AssistantMixin,
+    ChargingMixin,
+    StatsViewMixin,
+    PainterMixin,
+    QWidget,
+):
 
     ANCHORS = (
         ("top-center", "Top center"),
@@ -106,6 +129,7 @@ class WindowsGlance(PainterMixin, QWidget):
 
         # Interface state.
         self.state = "idle"
+        self.stats_view = False
         self.hover_item = None
 
         self._left_at = None
@@ -137,7 +161,10 @@ class WindowsGlance(PainterMixin, QWidget):
         self.monitor_worker = None
         self.metrics = None
         self.metrics_error = ""
-        self.net_history = deque(maxlen=60)
+        self.cpu_history = deque(maxlen=STATS_HISTORY)
+        self.mem_history = deque(maxlen=STATS_HISTORY)
+        self.disk_history = deque(maxlen=STATS_HISTORY)
+        self.net_history = deque(maxlen=STATS_HISTORY)
 
         # Theme.
         self.dark = system_uses_dark()
@@ -207,6 +234,12 @@ class WindowsGlance(PainterMixin, QWidget):
         # Performance monitor (CPU, RAM, disk, network).
         self.start_monitoring()
 
+        # Charging live activity.
+        self.init_charging()
+
+        # Voice assistant.
+        self.init_assistant()
+
         # Context menu.
         self.context_menu = ContextMenuController(
             self,
@@ -237,9 +270,18 @@ class WindowsGlance(PainterMixin, QWidget):
         self.metrics_error = ""
 
         try:
+            self.cpu_history.append(float(metrics["cpu"]["usage"]))
+            self.mem_history.append(float(metrics["memory"]["usage"]))
+
+            self.disk_history.append(
+                float(metrics["disk"]["read_speed"])
+                + float(metrics["disk"]["write_speed"])
+            )
+
             self.net_history.append(
                 float(metrics["network"]["download_speed"])
             )
+
         except (KeyError, TypeError, ValueError):
             pass
 
@@ -253,9 +295,28 @@ class WindowsGlance(PainterMixin, QWidget):
             self.update()
 
     def net_peak(self):
-        """Scale for the network bar: recent peak, at least 256 KB/s."""
+        """Scale for the network graph: recent peak, at least 256 KB/s."""
 
         return max(max(self.net_history, default=0.0), 256 * 1024.0)
+
+    def open_stats_view(self):
+        """Switch the expanded panel to the live performance view."""
+
+        if not self.monitor_available:
+            return
+
+        self.stats_view = True
+        self.hover_item = None
+        self.retarget()
+        self.update()
+
+    def close_stats_view(self):
+        """Return from the performance view to the normal panel."""
+
+        self.stats_view = False
+        self.hover_item = None
+        self.retarget()
+        self.update()
 
     def open_task_manager(self):
         try:
@@ -264,7 +325,7 @@ class WindowsGlance(PainterMixin, QWidget):
             pass
 
     def shutdown(self):
-        """Stop timers and the monitor thread before the app exits."""
+        """Stop timers, the voice helpers and the monitor thread on exit."""
 
         for timer in (
             self.poll_timer,
@@ -273,6 +334,8 @@ class WindowsGlance(PainterMixin, QWidget):
             self.fs_timer,
         ):
             timer.stop()
+
+        self.shutdown_assistant()
 
         thread = self.monitor_thread
 
@@ -352,15 +415,27 @@ class WindowsGlance(PainterMixin, QWidget):
         return bool(self.media and self.media["playing"])
 
     def hover_height(self):
+        if self.assistant_active:
+            return int(self.assistant_size()[1])
+
         return PILL_H + (HOVER_MEDIA_H if self.media else 0)
 
     def exp_height(self):
+        if self.stats_view:
+            return STATS_VIEW_H
+
         return EXP_H_MEDIA if self.media else EXP_H_BASE
 
     def compact_width(self):
         return 32 + self._status_row(None, 0, 0, 0)
 
     def target_size(self):
+        if self.assistant_active and self.state != "expanded":
+            return self.assistant_size()
+
+        if self.state == "idle" and self.charge_activity:
+            return self.charge_size()
+
         if self.state == "expanded":
             return float(EXP_W), float(self.exp_height())
 
@@ -388,11 +463,16 @@ class WindowsGlance(PainterMixin, QWidget):
 
         self.anim.setDuration(duration)
 
-        self.anim.setEasingCurve(
-            QEasingCurve.Type.OutQuart
-            if self.state == "expanded"
-            else QEasingCurve.Type.OutCubic
-        )
+        if self.state == "expanded":
+            curve = QEasingCurve.Type.OutQuart
+        elif self.state == "idle" and (
+            self.charge_activity or self.assistant_active
+        ):
+            curve = QEasingCurve.Type.OutBack   # small bounce on pop-out
+        else:
+            curve = QEasingCurve.Type.OutCubic
+
+        self.anim.setEasingCurve(curve)
 
         self.anim.setStartValue(QRectF(0, 0, self._w, self._h))
         self.anim.setEndValue(QRectF(0, 0, end[0], end[1]))
@@ -420,6 +500,15 @@ class WindowsGlance(PainterMixin, QWidget):
         self.state = state
         self._left_at = None
         self._enter_at = None
+
+        if state != "expanded":
+            self.stats_view = False
+
+        if state != "idle":
+            self.end_charge_activity(immediate=True)
+
+        if state == "expanded":
+            self.hide_assistant(immediate=True)
 
         if state == "idle":
             self._open_notification_popup = False
@@ -621,7 +710,8 @@ class WindowsGlance(PainterMixin, QWidget):
             popup_zone = QRectF(self.notification_popup.frameGeometry())
             zone = zone.united(popup_zone.adjusted(-6, -6, 6, 6))
 
-        if zone.contains(cur):
+        # hold_open_until keeps a voice-opened panel up while you talk.
+        if zone.contains(cur) or now < self.hold_open_until:
             self._left_at = None
 
         else:
@@ -660,6 +750,16 @@ class WindowsGlance(PainterMixin, QWidget):
             return None
 
         if self.state != "expanded":
+            return None
+
+        # Performance view controls.
+        if self.stats_view:
+            if STATS_BACK.contains(rel):
+                return ("stats_back", None)
+
+            if STATS_TASKMGR.contains(rel):
+                return ("stats_taskmgr", None)
+
             return None
 
         # Notification bell.
@@ -745,6 +845,16 @@ class WindowsGlance(PainterMixin, QWidget):
         if self.state != "expanded":
             return
 
+        # Performance view: only the header buttons react.
+        if self.stats_view:
+            if item == ("stats_back", None):
+                self.close_stats_view()
+
+            elif item == ("stats_taskmgr", None):
+                self.open_task_manager()
+
+            return
+
         if item is None:
             self.set_state("hover")
             return
@@ -763,7 +873,7 @@ class WindowsGlance(PainterMixin, QWidget):
                 self.toggle_radio("bt")
 
         elif kind == "stat":
-            self.open_task_manager()
+            self.open_stats_view()
 
         elif kind == "vol":
             tap_key(VK_VOLUME[item[1]])

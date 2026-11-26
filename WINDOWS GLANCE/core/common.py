@@ -56,6 +56,14 @@ CTRL = {
 
 PROGRESS_HIT = QRectF(16, MEDIA_Y + 72, EXP_W - 32, 16)
 
+# Performance view (shown inside the panel when a cell is clicked)
+STATS_HISTORY = 60
+STATS_CARD_W, STATS_CARD_H, STATS_CARD_GAP = 160, 108, 8
+STATS_VIEW_TOP = 56
+STATS_VIEW_H = STATS_VIEW_TOP + 2 * STATS_CARD_H + STATS_CARD_GAP + 16
+STATS_BACK = QRectF(12, 12, 32, 32)
+STATS_TASKMGR = QRectF(EXP_W - 116, 14, 100, 28)
+
 SETTINGS_URI = {
     "wifi": "ms-settings:network-wifi",
     "bt": "ms-settings:bluetooth",
@@ -303,21 +311,20 @@ def draw_weather(p, code, is_day, rect, dark):
     rain_col = QColor("#4DB1FF")
     lw = max(1.0, s * 0.07)
 
-    p.save()
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    def round_pen(color):
+        pen = QPen(color, lw)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        return pen
 
     def sun(cx, cy, r):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(sun_col)
         p.drawEllipse(QPointF(cx, cy), r, r)
 
-        pen = QPen(sun_col, lw)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
+        p.setPen(round_pen(sun_col))
 
         for i in range(8):
             a = i * math.pi / 4
-
             p.drawLine(
                 QPointF(cx + math.cos(a) * r * 1.5, cy + math.sin(a) * r * 1.5),
                 QPointF(cx + math.cos(a) * r * 1.9, cy + math.sin(a) * r * 1.9),
@@ -339,92 +346,106 @@ def draw_weather(p, code, is_day, rect, dark):
         p.drawPath(a.subtracted(b))
 
     def cloud(ox, oy, k):
+        """Solid cloud: rounded base plus three bumps, one unified shape."""
         b = s * k
         cx, cy = x + ox * s, y + oy * s
 
+        def pt(u, v):
+            return QPointF(cx + u * b, cy + v * b)
+
         path = QPainterPath()
-        path.addEllipse(QPointF(cx + .30 * b, cy + .62 * b), .20 * b, .20 * b)
-        path.addEllipse(QPointF(cx + .50 * b, cy + .48 * b), .26 * b, .26 * b)
-        path.addEllipse(QPointF(cx + .74 * b, cy + .64 * b), .18 * b, .18 * b)
+        path.setFillRule(Qt.FillRule.WindingFill)
+
+        # Flat rounded base.
         path.addRoundedRect(
-            QRectF(cx + .30 * b, cy + .62 * b, .44 * b, .20 * b),
-            .1 * b,
-            .1 * b,
+            QRectF(cx + .08 * b, cy + .52 * b, .84 * b, .34 * b),
+            .17 * b,
+            .17 * b,
         )
+
+        # Left, centre (largest) and right bumps.
+        path.addEllipse(pt(.33, .52), .17 * b, .17 * b)
+        path.addEllipse(pt(.53, .42), .24 * b, .24 * b)
+        path.addEllipse(pt(.75, .55), .15 * b, .15 * b)
 
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(cloud_col)
-        p.drawPath(path.simplified())
+        p.drawPath(path)
 
-    def lines(col, ys, slant=0.0):
-        pen = QPen(col, lw)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
+    def rain_lines(xs, y1, y2, slant):
+        p.setPen(round_pen(rain_col))
 
-        for lx, ly1, ly2 in ys:
+        for lx in xs:
             p.drawLine(
-                QPointF(x + lx * s, y + ly1 * s),
-                QPointF(x + (lx - slant) * s, y + ly2 * s),
+                QPointF(x + lx * s, y + y1 * s),
+                QPointF(x + (lx - slant) * s, y + y2 * s),
             )
 
-    if code in (0, 1):
-        if is_day:
-            sun(x + .5 * s, y + .5 * s, .2 * s)
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    try:
+        if code in (0, 1):
+            if is_day:
+                sun(x + .5 * s, y + .5 * s, .2 * s)
+            else:
+                moon(x + .5 * s, y + .5 * s, .26 * s)
+
+        elif code == 2:
+            if is_day:
+                sun(x + .36 * s, y + .36 * s, .15 * s)
+            else:
+                moon(x + .38 * s, y + .36 * s, .2 * s)
+
+            cloud(.12, .22, .88)
+
+        elif code in (45, 48):
+            cloud(.0, -.10, .95)
+            p.setPen(round_pen(cloud_col))
+
+            for ly, x1, x2 in ((.78, .20, .80), (.90, .30, .70)):
+                p.drawLine(
+                    QPointF(x + x1 * s, y + ly * s),
+                    QPointF(x + x2 * s, y + ly * s),
+                )
+
+        elif code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82):
+            cloud(.05, -.04, .9)
+            rain_lines((.34, .54, .74), .76, .94, .06)
+
+        elif 71 <= code <= 77 or code in (85, 86):
+            cloud(.05, -.04, .9)
+
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255) if dark else QColor(110, 150, 200))
+
+            for lx in (.32, .52, .72):
+                p.drawEllipse(QPointF(x + lx * s, y + .88 * s), .05 * s, .05 * s)
+
+        elif code >= 95:
+            cloud(.05, -.1, .9)
+
+            poly = QPolygonF([
+                QPointF(x + a * s, y + b * s)
+                for a, b in (
+                    (.55, .6),
+                    (.38, .84),
+                    (.50, .84),
+                    (.44, 1.0),
+                    (.64, .72),
+                    (.52, .72),
+                )
+            ])
+
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(sun_col)
+            p.drawPolygon(poly)
+
         else:
-            moon(x + .5 * s, y + .5 * s, .3 * s)
+            cloud(.0, .1, 1.0)
 
-    elif code == 2:
-        if is_day:
-            sun(x + .36 * s, y + .36 * s, .15 * s)
-        else:
-            moon(x + .38 * s, y + .36 * s, .2 * s)
-
-        cloud(.12, .22, .88)
-
-    elif code in (45, 48):
-        cloud(.0, -.04, 1.0)
-        lines(cloud_col, [(.28, .82, .82), (.5, .92, .92)])
-
-    elif code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82):
-        cloud(.05, -.04, .9)
-        lines(
-            rain_col,
-            [(.34, .76, .94), (.54, .76, .94), (.74, .76, .94)],
-            slant=.06,
-        )
-
-    elif 71 <= code <= 77 or code in (85, 86):
-        cloud(.05, -.04, .9)
-
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255) if dark else QColor(110, 150, 200))
-
-        for lx in (.32, .52, .72):
-            p.drawEllipse(QPointF(x + lx * s, y + .88 * s), .05 * s, .05 * s)
-
-    elif code >= 95:
-        cloud(.05, -.1, .9)
-
-        poly = QPolygonF([
-            QPointF(x + a * s, y + b * s)
-            for a, b in (
-                (.55, .6),
-                (.38, .84),
-                (.50, .84),
-                (.44, 1.0),
-                (.64, .72),
-                (.52, .72),
-            )
-        ])
-
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(sun_col)
-        p.drawPolygon(poly)
-
-    else:
-        cloud(.0, .1, 1.0)
-
-    p.restore()
+    finally:
+        p.restore()
 
 
 # --------------------------------------------------------------------------- #
