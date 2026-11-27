@@ -1,107 +1,241 @@
 # Windows Glance
 
-**A modern Windows desktop monitoring and system intelligence application.**
+<p align="center">
+  <strong>A smarter way to experience your Windows desktop.</strong>
+</p>
 
-Windows Glance is a Python-powered desktop application built with PySide6, designed to bring essential system information, monitoring tools, weather updates, and notifications into one unified interface.
+<p align="center">
+  A modern, animated desktop companion inspired by Dynamic Island, bringing system information, live activities, media controls and intelligent interactions into one elegant interface.
+</p>
 
-The project aims to simplify desktop system awareness through a clean, intuitive dashboard and useful background services.
+---
+
+## Overview
+
+**Windows Glance** is a lightweight desktop application for Windows that transforms the traditional desktop experience through an interactive, animated interface.
+
+Inspired by the Dynamic Island concept, Windows Glance provides contextual information and quick interactions without requiring users to interrupt their workflow.
+
+From battery activity and media playback to system monitoring, notifications and voice interaction, Windows Glance brings useful desktop functionality into a compact, visually integrated experience.
+
+The project is built with Python, PySide6 and native Windows capabilities.
 
 ## Features
 
-- **System Dashboard** – A centralized interface for viewing essential system information.
-- **System Monitoring** – Monitor important system metrics and activity.
-- **Weather Integration** – Access weather information directly from the desktop.
-- **Notification Center** – Centralized notification management with persistent storage and notification history.
-- **Background Processing** – Background workers for handling operations without blocking the user interface.
-- **Custom UI Rendering** – A custom-painted interface designed for a consistent desktop experience.
-- **Modern Desktop Experience** – A clean, organized interface built specifically for Windows.
+### Dynamic Desktop Interface
+- Animated, expandable desktop pill.
+- Smooth transitions between compact and expanded states.
+- Context-aware activity presentation.
+- Custom-drawn interface components.
+- Modern visual styling and animations.
+
+### System Monitoring
+- CPU and memory monitoring.
+- System performance information.
+- Battery percentage and charging status.
+- Wi-Fi connection information.
+- Bluetooth status.
+- Background metric collection.
+
+### Battery and Charging Activities
+- Automatic charger connection detection.
+- Charging and unplugging notifications.
+- Animated battery percentage display.
+- Temporary live activities.
+- Battery-state monitoring.
+
+### Media Integration
+- Windows media session integration.
+- Playback information.
+- Media controls.
+- Contextual media activity presentation.
+
+### Notifications
+- Notification management.
+- Custom notification popups.
+- Contextual notification presentation.
+- Integrated notification storage.
+
+### Voice Assistant
+- Windows-native speech recognition.
+- Text-to-speech functionality.
+- Voice command recognition.
+- Microphone activity visualization.
+- Offline speech processing using Windows speech components.
+
+### Weather Information
+- Current weather conditions.
+- Temperature and feels-like information.
+- Daily high and low temperatures.
+- Automatic location detection.
+- City-based location configuration.
 
 ## Technology Stack
 
 | Technology | Purpose |
 |---|---|
-| Python | Core application development |
-| PySide6 | Desktop GUI framework |
-| Qt | Interface rendering and application architecture |
-| JSON | Data persistence |
-| Windows | Target operating system |
+| Python | Application logic |
+| PySide6 | Desktop interface and event handling |
+| Qt | Rendering, animations and timers |
+| Windows APIs | Native system integration |
+| Windows Runtime (WinRT) | Media, network and device integration |
+| PowerShell | Native Windows speech services |
+| Open-Meteo | Weather information |
+| Multithreading / Asyncio | Background processing |
 
 ## Project Structure
 
-The application follows a modular architecture, separating interface components, background services, and core application functionality.
-
 ```text
-WINDOWS GLANCE/
+Windows-Glance/
 │
-├── core/
-│   ├── notification_store.py
-│   └── weather_worker.py
+├── WINDOWS GLANCE/
+│   ├── main.py
+│   │
+│   ├── core/
+│   │   ├── engine.py
+│   │   ├── common.py
+│   │   ├── system_worker.py
+│   │   ├── system_monitor.py
+│   │   ├── system_monitor_worker.py
+│   │   ├── voice.py
+│   │   ├── commands.py
+│   │   ├── notification_store.py
+│   │   └── weather_worker.py
+│   │
+│   ├── ui/
+│   │   ├── painter.py
+│   │   ├── charging.py
+│   │   ├── assistant_view.py
+│   │   ├── notification_popup.py
+│   │   └── components.py
+│   │
+│   ├── integrations/
+│   │
+│   ├── assets/
+│   │
+│   └── requirements.txt
 │
-├── ui/
-│   ├── painter.py
-│   └── notification_popup.py
-│
-├── main.py
-│
-└── README.md
+├── README.md
+└── .gitignore
 ```
 
-*The structure above highlights selected components and is not an exhaustive directory listing.*
+*The structure above illustrates the principal application modules; individual files and directories may vary between development versions.*
 
 ## Installation
 
 ### Requirements
 
-- Windows 10 or Windows 11
-- Python 3.10 or later
-- pip
+- Windows 10 or Windows 11.
+- Python 3.10 or newer.
+- pip.
+- Internet connection for weather information.
+- Windows speech components for voice functionality.
 
-### Setup
+### 1. Clone the repository
 
-1. Clone the repository:
-
-```bash
-git clone YOUR_REPOSITORY_URL
+```powershell
+git clone https://github.com/lam3c/Windows-Glance.git
 ```
 
-2. Navigate into the project directory:
+### 2. Navigate to the application directory
 
-```bash
-cd WINDOWS-GLANCE
+```powershell
+cd Windows-Glance
+cd "WINDOWS GLANCE"
 ```
 
-3. Create a virtual environment:
+### 3. Create a virtual environment
 
-```bash
+```powershell
 python -m venv .venv
 ```
 
-4. Activate the environment:
+### 4. Activate the environment
 
 ```powershell
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 ```
 
-5. Install dependencies:
+If PowerShell blocks activation:
 
-```bash
-pip install PySide6
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+.\.venv\Scripts\Activate.ps1
 ```
 
-6. Launch the application:
+### 5. Install dependencies
 
-```bash
+```powershell
+pip install -r requirements.txt
+```
+
+### 6. Launch Windows Glance
+
+```powershell
 python main.py
 ```
 
-## Development Status
+## Development
 
-Windows Glance is actively under development. Its architecture, interface, and functionality are continuously evolving.
+Windows Glance is actively developed. Its architecture separates application logic, interface rendering, background workers and individual feature implementations.
 
-## Vision
+This modular approach makes it easier to introduce new functionality while maintaining the existing application.
 
-The long-term goal is to develop Windows Glance into a comprehensive desktop intelligence platform that combines system awareness, monitoring, notifications, and useful contextual information in one application.
+Developers can explore the source code, report issues and contribute improvements.
+
+### Running the charging demonstration
+
+To test the charging activity without physically connecting a charger:
+
+```powershell
+$env:GLANCE_DEMO = 1
+python main.py
+```
+
+## Project Goals
+
+Windows Glance aims to develop into a comprehensive desktop companion with:
+
+- More intelligent contextual activities.
+- Expanded desktop customization.
+- Advanced system monitoring.
+- Improved media and notification integration.
+- A more capable voice assistant.
+- Additional Windows integrations.
+- Better performance and resource efficiency.
+
+## Contributing
+
+Contributions, suggestions and bug reports are welcome.
+
+If you would like to contribute:
+
+1. Fork the repository.
+2. Create a feature branch.
+3. Implement and test your changes.
+4. Submit a pull request describing your contribution.
+
+For significant changes, consider opening an issue first to discuss the proposed implementation.
+
+## Project Status
+
+**Active Development**
+
+Windows Glance is an evolving project. Features, interface components and internal architecture may change as development progresses.
+
+Not every planned feature is necessarily available or fully implemented in the current release.
 
 ## License
 
-License information will be provided in a future release.
+See the repository for licensing information.
+
+---
+
+<p align="center">
+  <strong>Windows Glance</strong><br>
+  Making the Windows desktop more informative, interactive and intuitive.
+</p>
+
+<p align="center">
+  Developed by <a href="https://github.com/lam3c">Lam3c</a>
+</p>
