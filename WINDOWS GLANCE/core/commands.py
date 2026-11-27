@@ -10,13 +10,13 @@ import datetime
 import os
 import random
 import re
-import subprocess
 import time
 import webbrowser
 
 from PySide6.QtCore import QTimer
 
 from core.common import VK_VOLUME, tap_key, wx_text
+from core.system_worker import WINRT
 
 
 # How Glance addresses you.
@@ -34,7 +34,7 @@ APPS = {
     "chrome": "chrome",
     "edge": "msedge",
     "visual studio code": "code",
-    "camera": "microsoft.windows.camera",
+    "camera": "microsoft.windows.camera:",
     "spotify": "spotify:",
 }
 
@@ -45,7 +45,7 @@ SITES = {
     "github": "https://github.com",
     "gmail": "https://mail.google.com",
     "claude": "https://claude.ai",
-    "Quant deck": "https://quantdeck.page.gd",
+    "quant deck": "https://quantdeck.page.gd",
 }
 
 
@@ -68,14 +68,19 @@ class CommandRouter:
     def __init__(self, glance):
         self.g = glance
         self.map = {}
+        self._lookup = {}
         self._build()
+
+        self._lookup = {
+            self._normalise(phrase): handler
+            for phrase, handler in self.map.items()
+        }
 
     # Public API
 
-    def grammar_phrases(self, wake):
+    def grammar_phrases(self):
         """Every phrase the recogniser should listen for."""
-        phrases = sorted(self.map)
-        return [wake] + [f"{wake} {phrase}" for phrase in phrases] + phrases
+        return sorted(self.map)
 
     @staticmethod
     def _normalise(text):
@@ -83,12 +88,7 @@ class CommandRouter:
 
     def handle(self, text):
         """Run a command. Returns (reply, keep_listening)."""
-        key = self._normalise(text)
-        handler = next(
-            (callback for phrase, callback in self.map.items()
-             if self._normalise(phrase) == key),
-            None,
-        )
+        handler = self._lookup.get(self._normalise(text))
 
         if handler is None:
             return f"Apologies, Sir. I didn't quite catch that, {TITLE}.", True
@@ -311,7 +311,8 @@ class CommandRouter:
         return (
             "I can open apps and websites, report the time, weather, battery and "
             "system performance, control music and volume, switch Wi-Fi and "
-            "Bluetooth, take screenshots and lock your computer. Just say my name first."
+            "Bluetooth, take screenshots and lock your computer. "
+            "Press the microphone button, then ask."
         )
 
     def _joke(self):
@@ -419,14 +420,13 @@ class CommandRouter:
             return "Sending the media command."
 
         playing = bool(g.media["playing"])
-        if want is None:
-            g.media_action("pause" if playing else "play")
-            return "Paused." if playing else "Playing."
-        if playing == want:
+
+        if want is not None and playing == want:
             return "Already playing." if want else "Already paused."
 
-        g.media_action("play" if want else "pause")
-        return "Playing." if want else "Paused."
+        # The widget only has one play/pause toggle, used for both directions.
+        g.media_action("play")
+        return "Paused." if playing else "Playing."
 
     def _skip(self, which):
         g = self.g
@@ -453,29 +453,29 @@ class CommandRouter:
 
     def _radio(self, kind, name, want):
         g = self.g
+
         if kind == "wifi":
             current = g.wifi_on if g.wifi_on is not None else g.wifi_connected
-            if current is not None and bool(current) == want:
-                return f"{name} is already {'on' if want else 'off'}."
-            state = "enabled" if want else "disabled"
-            command = (
-                "netsh interface set interface name=\"Wi-Fi\" admin=enabled"
-                if want
-                else "netsh interface set interface name=\"Wi-Fi\" admin=disabled"
-            )
-            subprocess.run(command, shell=True, check=True, capture_output=True)
-            return f"{name} has been {state}."
+        else:
+            current = g.bt
 
-        # Windows does not provide a simple built-in command to toggle Bluetooth.
-        # Open its settings page rather than pretending the toggle was changed.
-        os.startfile("ms-settings:bluetooth")
-        return f"Opening Bluetooth settings so you can turn it {'on' if want else 'off'}."
+        # Without the Windows Runtime packages the widget can only open the
+        # matching Settings page.
+        if not WINRT:
+            g.toggle_radio(kind)
+            return f"Opening {name} settings, {TITLE}."
+
+        if current is not None and bool(current) == want:
+            return f"{name} is already {'on' if want else 'off'}."
+
+        g.toggle_radio(kind)
+        return f"Turning {name} {'on' if want else 'off'}."
 
     def _open_app(self, name, target):
-        if target.endswith(":") or target.startswith("microsoft.windows."):
+        try:
             os.startfile(target)
-        else:
-            subprocess.Popen(target, shell=True)
+        except OSError:
+            return f"I could not open {name}, {TITLE}."
         return f"Opening {name}."
 
     def _open_site(self, name, url):

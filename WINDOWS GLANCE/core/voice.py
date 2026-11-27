@@ -5,9 +5,13 @@ Speech recognition and text-to-speech each run in a small PowerShell helper
 (System.Speech / SAPI, built into Windows), so no extra Python packages or API
 keys are needed and everything works offline.
 
+The recognition helper is started "armed": the engine and grammar are loaded
+but the microphone stays CLOSED until start_listening() creates a flag file.
+stop_listening() kills the helper (which releases the microphone completely)
+and starts a fresh armed one for next time.
+
 Recognition events (one line each):
-    READY | ERROR|msg | HEARD|confidence|text | HYP|partial text
-    REJECT | LEVEL|0-100
+    READY | LISTENING | ERROR|msg | HEARD|confidence|text | LEVEL|0-100
 Speech events:
     VOICE|name | WARN|msg | ERROR|msg | READY | DONE
 """
@@ -21,6 +25,7 @@ from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 STT_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 $parent = __PARENT_PID__
+$flag = '__FLAG_PATH__'
 
 function Send($text) {
     [Console]::Out.WriteLine($text)
@@ -38,20 +43,17 @@ __PHRASES__
     $builder = New-Object System.Speech.Recognition.GrammarBuilder
     $builder.Append($choices)
     $engine.LoadGrammar((New-Object System.Speech.Recognition.Grammar($builder)))
-    $engine.SetInputToDefaultAudioDevice()
 
     Register-ObjectEvent -InputObject $engine -EventName SpeechRecognized -SourceIdentifier 'g_heard' | Out-Null
-    Register-ObjectEvent -InputObject $engine -EventName SpeechHypothesized -SourceIdentifier 'g_hyp' | Out-Null
-    Register-ObjectEvent -InputObject $engine -EventName SpeechRecognitionRejected -SourceIdentifier 'g_reject' | Out-Null
     Register-ObjectEvent -InputObject $engine -EventName AudioLevelUpdated -SourceIdentifier 'g_level' | Out-Null
 
-    $engine.RecognizeAsync([System.Speech.Recognition.RecognizeMode]::Multiple)
     Send 'READY'
 } catch {
     Send ('ERROR|' + $_.Exception.Message)
     exit 1
 }
 
+$listening = $false
 $lastLevel = -1
 $lastSend = 0
 $lastCheck = [Environment]::TickCount
@@ -62,20 +64,25 @@ while ($true) {
         if (-not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { exit 0 }
     }
 
-    $events = @(Wait-Event -Timeout 1)
+    # The microphone is only opened once the flag file exists.
+    if ((-not $listening) -and (Test-Path -LiteralPath $flag)) {
+        try {
+            $engine.SetInputToDefaultAudioDevice()
+            $engine.RecognizeAsync([System.Speech.Recognition.RecognizeMode]::Multiple)
+            $listening = $true
+            Send 'LISTENING'
+        } catch {
+            Send ('ERROR|' + $_.Exception.Message)
+            Start-Sleep -Seconds 2
+        }
+    }
 
-    foreach ($ev in $events) {
+    foreach ($ev in @(Get-Event)) {
         try {
             switch ($ev.SourceIdentifier) {
                 'g_heard' {
                     $r = $ev.SourceEventArgs.Result
                     Send ('HEARD|' + [math]::Round($r.Confidence, 2) + '|' + $r.Text)
-                }
-                'g_hyp' {
-                    Send ('HYP|' + $ev.SourceEventArgs.Result.Text)
-                }
-                'g_reject' {
-                    Send 'REJECT'
                 }
                 'g_level' {
                     $level = [int]$ev.SourceEventArgs.AudioLevel
@@ -92,6 +99,8 @@ while ($true) {
 
         Remove-Event -EventIdentifier $ev.EventIdentifier -ErrorAction SilentlyContinue
     }
+
+    Start-Sleep -Milliseconds 60
 }
 """
 
@@ -170,9 +179,8 @@ class VoiceIO(QObject):
     """Owns the speech-recognition and speech-synthesis helper processes."""
 
     heard = Signal(str, float)     # recognised text, confidence 0..1
-    hypothesis = Signal(str)       # partial text while the user is speaking
     level = Signal(int)            # microphone level 0..100
-    rejected = Signal()            # speech heard but not understood
+    listening = Signal()           # the microphone is now live
     speech_done = Signal()         # everything queued has been spoken
     status = Signal(str, bool)     # message, is_error
 
@@ -186,11 +194,14 @@ class VoiceIO(QObject):
         self.tts_failed = False
         self.speaking = False
 
+        self._stt_path = ""
         self._tts_path = ""
+        self._flag_path = ""
         self._pending = 0
         self._outbox = []
         self._stt_buf = ""
         self._tts_buf = ""
+        self._ready_announced = False
         self._closing = False
 
     # ------------------------------------------------------------------ #
@@ -198,9 +209,16 @@ class VoiceIO(QObject):
     # ------------------------------------------------------------------ #
 
     def start(self, phrases):
+        """Write the helper scripts and start both helpers (mic stays off)."""
+
         folder = tempfile.gettempdir()
-        stt_path = os.path.join(folder, "windows_glance_stt.ps1")
+        pid = os.getpid()
+
+        self._stt_path = os.path.join(folder, "windows_glance_stt.ps1")
         self._tts_path = os.path.join(folder, "windows_glance_tts.ps1")
+        self._flag_path = os.path.join(folder, f"windows_glance_listen_{pid}.flag")
+
+        self._remove_flag()
 
         clean = []
 
@@ -215,15 +233,16 @@ class VoiceIO(QObject):
 
         stt_script = (
             STT_SCRIPT
-            .replace("__PARENT_PID__", str(os.getpid()))
+            .replace("__PARENT_PID__", str(pid))
+            .replace("__FLAG_PATH__", self._flag_path.replace("'", "''"))
             .replace("__PHRASES__", body)
         )
 
         try:
-            with open(stt_path, "w", encoding="ascii") as f:
+            with open(self._stt_path, "w", encoding="utf-8-sig") as f:
                 f.write(stt_script)
 
-            with open(self._tts_path, "w", encoding="ascii") as f:
+            with open(self._tts_path, "w", encoding="utf-8-sig") as f:
                 f.write(TTS_SCRIPT)
 
         except OSError as exc:
@@ -235,31 +254,16 @@ class VoiceIO(QObject):
             return
 
         self._start_tts()
+        self._start_stt()
 
-        self.stt = self._launch(
-            stt_path,
-            self._read_stt,
-            self._stt_finished,
-        )
-
-    def _start_tts(self):
-        self._tts_buf = ""
-        self.tts_failed = False
-        self.tts_ready = False
-
-        self.tts = self._launch(
-            self._tts_path,
-            self._read_tts,
-            self._tts_finished,
-            self._flush,
-        )
-
-    def _launch(self, path, on_output, on_finished, on_started=None):
+    def _launch(self, path, label, on_output, on_finished, on_started=None):
         proc = QProcess(self)
 
         proc.readyReadStandardOutput.connect(on_output)
         proc.finished.connect(on_finished)
-        proc.errorOccurred.connect(self._process_error)
+        proc.errorOccurred.connect(
+            lambda error, name=label: self._process_error(name, error)
+        )
 
         if on_started is not None:
             proc.started.connect(on_started)
@@ -278,13 +282,16 @@ class VoiceIO(QObject):
 
         return proc
 
-    def _process_error(self, error):
+    def _process_error(self, label, error):
         if error == QProcess.ProcessError.FailedToStart:
-            self.tts_failed = True
-            self.status.emit("Voice error: PowerShell could not be started", True)
+            if label == "Speech output":
+                self.tts_failed = True
+
+            self.status.emit(f"Voice error: {label} could not be started", True)
 
     def shutdown(self):
         self._closing = True
+        self._remove_flag()
 
         for proc in (self.stt, self.tts):
             if proc is not None and proc.state() != QProcess.ProcessState.NotRunning:
@@ -292,8 +299,64 @@ class VoiceIO(QObject):
                 proc.waitForFinished(500)
 
     # ------------------------------------------------------------------ #
-    # Speech recognition
+    # Speech recognition (microphone)
     # ------------------------------------------------------------------ #
+
+    def _start_stt(self):
+        self._stt_buf = ""
+        self.stt_ready = False
+
+        self.stt = self._launch(
+            self._stt_path,
+            "Speech recognition",
+            self._read_stt,
+            self._stt_finished,
+        )
+
+    def can_listen(self):
+        return (
+            self.stt is not None
+            and self.stt.state() != QProcess.ProcessState.NotRunning
+        )
+
+    def start_listening(self):
+        """Open the microphone (the armed helper starts recognising)."""
+
+        if not self.can_listen():
+            self._start_stt()
+
+        try:
+            with open(self._flag_path, "w"):
+                pass
+
+        except OSError as exc:
+            self.status.emit(f"Voice error: cannot start the microphone ({exc})", True)
+
+    def stop_listening(self):
+        """Close the microphone completely and re-arm a fresh helper."""
+
+        self._remove_flag()
+
+        old = self.stt
+
+        if old is not None:
+            old.blockSignals(True)
+
+            if old.state() != QProcess.ProcessState.NotRunning:
+                old.kill()
+
+            old.deleteLater()
+
+        self.stt = None
+
+        if not self._closing:
+            self._start_stt()
+
+    def _remove_flag(self):
+        try:
+            os.remove(self._flag_path)
+        except OSError:
+            pass
 
     def _read_stt(self):
         data = bytes(self.stt.readAllStandardOutput()).decode("utf-8", "ignore")
@@ -315,17 +378,20 @@ class VoiceIO(QObject):
 
             return
 
-        if line.startswith("HYP|"):
-            self.hypothesis.emit(line[4:].strip())
-            return
-
-        if line == "REJECT":
-            self.rejected.emit()
+        if line == "LISTENING":
+            self.listening.emit()
             return
 
         if line == "READY":
             self.stt_ready = True
-            self.status.emit("Voice recognition ready", False)
+
+            if not self._ready_announced:
+                self._ready_announced = True
+                self.status.emit(
+                    "Voice recognition ready (microphone stays off until you press the mic button)",
+                    False,
+                )
+
             return
 
         if line.startswith("ERROR|"):
@@ -348,11 +414,24 @@ class VoiceIO(QObject):
             return
 
         self.stt_ready = False
-        self.status.emit("Voice error: recognition stopped", True)
+        self.status.emit("Voice error: speech recognition stopped", True)
 
     # ------------------------------------------------------------------ #
     # Speech synthesis
     # ------------------------------------------------------------------ #
+
+    def _start_tts(self):
+        self._tts_buf = ""
+        self.tts_failed = False
+        self.tts_ready = False
+
+        self.tts = self._launch(
+            self._tts_path,
+            "Speech output",
+            self._read_tts,
+            self._tts_finished,
+            self._flush,
+        )
 
     def say(self, text):
         text = str(text).encode("ascii", "ignore").decode("ascii")
@@ -366,7 +445,7 @@ class VoiceIO(QObject):
         self._pending += 1
 
         if self.tts_failed or self.tts is None:
-            # No voice available: pretend to speak so the caption stays up.
+            # No voice available: pretend to speak so the orb still animates.
             QTimer.singleShot(
                 min(6000, 1500 + 60 * len(text)),
                 self._finish_one,

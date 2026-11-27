@@ -1,19 +1,19 @@
 """
 Windows Glance - the "Glance" voice assistant.
 
-Say "Glance" (or press the microphone button), then give a command. While it
-listens, thinks or speaks, the pill pops out and shows a fluid, Siri-style
-orb that reacts to your real microphone level, a live caption of what Windows
-hears, and a stop/mic button.
+Off until you press the microphone button (hover pill or expanded panel).
+Then a small pill shows a glowing, fluid orb that reacts to your voice while
+Glance listens, swirls while it thinks and pulses while it speaks. Say one
+command; Glance answers out loud and closes. Click the orb to cancel.
 
-Hooked into engine.py through AssistantMixin. Needs no extra packages: it uses
-the speech engine built into Windows.
+The microphone is only open while the orb is listening.
+
+Hooked into engine.py through AssistantMixin.
 
 Test without a microphone (PowerShell):
     $env:GLANCE_SAY = "what is the battery"; python main.py
 """
 
-import datetime
 import math
 import os
 import threading
@@ -23,44 +23,33 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (
     QBrush,
     QColor,
-    QFont,
-    QFontMetricsF,
     QImage,
     QPainter,
     QPainterPath,
     QRadialGradient,
 )
 
-from core.commands import TITLE, CommandRouter
+from core.commands import CommandRouter
 from core.common import (
     PILL_H,
     clamp,
     draw_glyph,
-    draw_text,
     set_click_through,
-    ui_font,
     with_alpha,
 )
 from core.voice import VoiceIO
 
 
-WAKE_WORD = "glance"
-
-WAKE_CONFIDENCE = 0.55       # lower = easier to wake, more false wakes
 COMMAND_CONFIDENCE = 0.65    # lower = accepts shakier commands
-AWAKE_SECONDS = 7.0          # time to give a command after the wake word
-MANUAL_SECONDS = 10.0        # time to speak after pressing the mic button
-FOLLOWUP_SECONDS = 5.0       # follow-up window after an answer
+LISTEN_SECONDS = 12.0        # how long the microphone stays open
+CHIME = True                 # short beep when the microphone goes live
 
-CHIME = True                 # short beep when Glance starts listening
-STARTUP_GREETING = True      # spoken greeting when the app starts
-
-ASSIST_W = 320
-ASSIST_H = 52
+ASSIST_W = 84                # the AI pill is just a small capsule
+ASSIST_H = 58
 MIC_SLOT = 52                # extra width of the hover pill for the mic button
 
-ORB_SIZE = 60                # orb canvas, logical pixels
-ORB_RADIUS = 15.0
+ORB_SIZE = 64                # orb canvas, logical pixels
+ORB_RADIUS = 16.0
 
 # (colour, phase, speed) for the blended light blobs inside the orb.
 ORB_COLORS = (
@@ -77,42 +66,29 @@ ORB_ALERT = (
     (QColor(255, 200, 120), 1.00, 0.65),
 )
 
-LABELS = {
-    "listening": "LISTENING",
-    "thinking": "PROCESSING",
-    "speaking": "SPEAKING",
-    "notice": "ERROR",
-}
-
 
 def _beep():
     try:
         import winsound
 
-        winsound.Beep(880, 55)
-        winsound.Beep(1320, 70)
+        winsound.Beep(1100, 70)
     except Exception:
         pass
 
 
 class AssistantMixin:
-    """Voice assistant state machine, mic button and orb painting."""
+    """Voice assistant state machine, mic button and glowing orb."""
 
     # Class-level defaults so attributes exist before init_assistant().
-    assistant_active = False     # pill is showing the assistant
+    assistant_active = False     # pill is showing the orb
     _assist_paint = False        # keep painting while the pill shrinks
-    assist_state = "off"         # off, listening, thinking, speaking, notice
+    assist_state = "off"         # off, listening, thinking, speaking, error
     _assist_draw_state = "listening"
-    assist_caption = ""
-    assist_hyp = ""
+    mic_live = False             # the microphone is actually open
     mic_level = 0.0
-    _hyp_t = 0.0
-    _assist_cap_t = 0.0
     _assist_shown_at = 0.0
-    _awake_until = 0.0
-    _mic_ignore_until = 0.0
-    _follow_up = True
-    _error_shown = False
+    _session_until = 0.0
+    _error_until = 0.0
     hold_open_until = 0.0
 
     # ------------------------------------------------------------------ #
@@ -124,9 +100,8 @@ class AssistantMixin:
 
         self.voice = VoiceIO(self)
         self.voice.heard.connect(self._on_heard)
-        self.voice.hypothesis.connect(self._on_hypothesis)
         self.voice.level.connect(self._on_level)
-        self.voice.rejected.connect(self._on_rejected)
+        self.voice.listening.connect(self._on_mic_live)
         self.voice.speech_done.connect(self._on_speech_done)
         self.voice.status.connect(self._on_voice_status)
 
@@ -134,15 +109,13 @@ class AssistantMixin:
         self._assist_timer.setInterval(33)
         self._assist_timer.timeout.connect(self._assist_tick)
 
-        self.voice.start(self.assist_router.grammar_phrases(WAKE_WORD))
-
-        if STARTUP_GREETING:
-            QTimer.singleShot(3000, self._startup_greeting)
+        # Helpers start armed, but the microphone stays closed until clicked.
+        self.voice.start(sorted(self.assist_router.map))
 
         test = os.environ.get("GLANCE_SAY")
 
         if test:
-            QTimer.singleShot(7000, lambda: self._run_command(test.lower()))
+            QTimer.singleShot(5000, lambda: self._run_command(test.lower()))
 
     def shutdown_assistant(self):
         self._assist_timer.stop()
@@ -158,6 +131,10 @@ class AssistantMixin:
     def mic_rect(self):
         card = self._card
 
+        # While the orb is showing, the whole pill is the cancel button.
+        if self.assistant_active:
+            return QRectF(0, 0, card.width(), card.height())
+
         if self.state == "expanded":
             if self.stats_view:
                 return None
@@ -166,110 +143,77 @@ class AssistantMixin:
 
             return QRectF(mute.left() - 36, mute.top(), 32, 32)
 
-        if self.assistant_active:
-            return QRectF(card.width() - 44, ASSIST_H / 2 - 14, 28, 28)
-
         if self.state == "hover":
             return QRectF(card.width() - 38, PILL_H / 2 - 13, 26, 26)
 
         return None
 
     def toggle_listening(self):
-        """Mic button: start a listening session, or stop whatever is running."""
+        """Mic button: start one listening session, or cancel the current one."""
 
-        state = self.assist_state
-
-        if state == "off":
-            if self.state == "expanded":
-                self.set_state("hover")
-
-            self._chime()
-            self._awake_until = time.perf_counter() + MANUAL_SECONDS
-            self.assist_hyp = ""
-            self._set_assist("listening", "Listening\u2026")
-            self._show_assist()
+        if self.assist_state != "off":
+            self._cancel_session()
             return
 
-        self._awake_until = 0.0
-        self.mic_level = 0.0
-        self.assist_hyp = ""
+        if self.state == "expanded":
+            self.set_state("hover")
 
-        if state == "speaking" or self.voice.speaking:
+        self.mic_live = False
+        self.mic_level = 0.0
+        self._session_until = time.perf_counter() + LISTEN_SECONDS
+
+        self._set_assist("listening")
+        self._show_assist()
+        self.voice.start_listening()
+
+    def _cancel_session(self):
+        if self.assist_state == "listening":
+            self.voice.stop_listening()
+
+        if self.voice.speaking:
             self.voice.stop_speaking()
 
         self._end_assist()
 
     # ------------------------------------------------------------------ #
-    # Hearing
+    # Voice events
     # ------------------------------------------------------------------ #
 
+    def _on_mic_live(self):
+        if self.assist_state == "listening":
+            self.mic_live = True
+
+            if CHIME:
+                threading.Thread(target=_beep, daemon=True).start()
+
+    def _on_level(self, value):
+        if self.assist_state == "listening" and self.mic_live:
+            self.mic_level = max(self.mic_level, clamp(value / 55.0))
+
     def _on_heard(self, text, conf):
-        now = time.perf_counter()
         t = " ".join(text.lower().split())
 
         print(f"[Glance] heard '{t}' ({conf:.2f})")
 
-        # Ignore the microphone while Glance is busy (or hearing itself).
-        if self.voice.speaking or now < self._mic_ignore_until:
+        if self.assist_state != "listening" or not t:
             return
 
-        if self.assist_state in ("thinking", "speaking"):
+        if conf < COMMAND_CONFIDENCE:
             return
 
-        if t == WAKE_WORD:
-            if conf >= WAKE_CONFIDENCE:
-                self._wake()
-
-            return
-
-        prefix = WAKE_WORD + " "
-
-        if t.startswith(prefix):
-            if conf >= COMMAND_CONFIDENCE:
-                self._run_command(t[len(prefix):])
-
-            return
-
-        if now < self._awake_until and conf >= COMMAND_CONFIDENCE:
-            self._run_command(t)
-
-    def _on_hypothesis(self, text):
-        if self.assist_state == "listening" and not self.voice.speaking:
-            self.assist_hyp = text.capitalize()
-            self._hyp_t = time.perf_counter()
-
-    def _on_rejected(self):
-        if self.assist_state == "listening" and not self.voice.speaking:
-            self.assist_hyp = "Not recognised"
-            self._hyp_t = time.perf_counter()
-
-    def _on_level(self, value):
-        if self.assist_state == "listening":
-            self.mic_level = max(self.mic_level, clamp(value / 55.0))
+        self._run_command(t)
 
     def _on_voice_status(self, message, is_error):
         print(f"[Glance voice] {message}")
 
-        if is_error and not self._error_shown:
-            self._error_shown = True
-            self._awake_until = time.perf_counter() + 4.0
-            self._set_assist("notice", message[:60])
-            self._show_assist()
+        # Only show a problem if the user is actually using the assistant.
+        if is_error and self.assist_state == "listening":
+            self.voice.stop_listening()
+            self._flash_error()
 
     # ------------------------------------------------------------------ #
     # Conversation flow
     # ------------------------------------------------------------------ #
-
-    def _chime(self):
-        if CHIME:
-            threading.Thread(target=_beep, daemon=True).start()
-
-    def _wake(self):
-        self._chime()
-        self._awake_until = time.perf_counter() + AWAKE_SECONDS
-        self.assist_hyp = ""
-        self._set_assist("listening", "Listening\u2026")
-        self._show_assist()
 
     def _run_command(self, cmd):
         cmd = cmd.strip()
@@ -277,56 +221,36 @@ class AssistantMixin:
         if not cmd:
             return
 
-        self._awake_until = 0.0
-        self.assist_hyp = ""
-        self._set_assist("thinking", cmd.capitalize())
+        # Close the microphone as soon as a command has been heard.
+        if self.assist_state == "listening":
+            self.voice.stop_listening()
+
+        self._set_assist("thinking")
         self._show_assist()
 
-        reply, follow = self.assist_router.handle(cmd)
-        self._follow_up = follow
+        reply, _keep_listening = self.assist_router.handle(cmd)
 
-        QTimer.singleShot(280, lambda r=reply: self._deliver(r))
+        QTimer.singleShot(250, lambda r=reply: self._deliver(r))
 
     def _deliver(self, reply):
         if self.assist_state != "thinking":
-            return  # cancelled with the mic button
+            return  # cancelled by clicking the orb
 
-        self._set_assist("speaking", reply)
+        self._set_assist("speaking")
         self.voice.say(reply)
 
-    def _announce(self, text):
-        self._follow_up = False
-        self._set_assist("speaking", text)
-        self._show_assist()
-        self.voice.say(text)
-
-    def _startup_greeting(self):
-        hour = datetime.datetime.now().hour
-        part = "morning" if hour < 12 else "afternoon" if hour < 18 else "evening"
-
-        self._announce(
-            f"Good {part}, {TITLE}. Glance is online and all systems are operational."
-        )
-
     def _on_speech_done(self):
-        now = time.perf_counter()
-        self._mic_ignore_until = now + 0.9
-
-        if self.assist_state != "speaking":
-            return
-
-        if self._follow_up:
-            self._awake_until = now + FOLLOWUP_SECONDS
-            self.assist_hyp = ""
-            self._set_assist("listening", "Listening\u2026")
-        else:
+        if self.assist_state == "speaking":
             self._end_assist()
 
-    def _set_assist(self, state, caption):
+    def _flash_error(self):
+        self._error_until = time.perf_counter() + 1.8
+        self._set_assist("error")
+        self._show_assist()
+
+    def _set_assist(self, state):
         self.assist_state = state
         self._assist_draw_state = state
-        self.assist_caption = caption
-        self._assist_cap_t = time.perf_counter()
 
         if not self._assist_timer.isActive():
             self._assist_timer.start()
@@ -335,18 +259,30 @@ class AssistantMixin:
 
     def _end_assist(self):
         self.assist_state = "off"
+        self.mic_live = False
         self.mic_level = 0.0
         self._assist_timer.stop()
         self.hide_assistant()
 
     def _assist_tick(self):
         now = time.perf_counter()
+        state = self.assist_state
 
-        if self.assist_state == "off":
+        if state == "off":
             self._assist_timer.stop()
             return
 
-        if self.assist_state in ("listening", "notice") and now >= self._awake_until:
+        if state == "listening" and now >= self._session_until:
+            self.voice.stop_listening()
+
+            if self.mic_live:
+                self._end_assist()      # heard nothing: just close quietly
+            else:
+                self._flash_error()     # the microphone never came on
+
+            return
+
+        if state == "error" and now >= self._error_until:
             self._end_assist()
             return
 
@@ -372,7 +308,7 @@ class AssistantMixin:
         self._assist_paint = True
         self._assist_shown_at = time.perf_counter()
 
-        # The pill must accept clicks so the mic / stop button works.
+        # The pill must accept clicks so the orb can cancel.
         set_click_through(self, False)
 
         self.retarget(480)
@@ -391,7 +327,7 @@ class AssistantMixin:
         self.retarget(320)
         self.update()
 
-        # Keep painting the content while the pill shrinks.
+        # Keep painting the orb while the pill shrinks.
         QTimer.singleShot(450, self._assist_clear_paint)
 
     def _assist_clear_paint(self):
@@ -401,7 +337,7 @@ class AssistantMixin:
             self.update()
 
     def start_charge_activity(self, kind):
-        # Do not interrupt Glance with the charging animation.
+        # Do not interrupt a running AI session with the charging animation.
         if self.assistant_active or self.assist_state != "off":
             return
 
@@ -448,12 +384,12 @@ class AssistantMixin:
         p.setPen(Qt.PenStyle.NoPen)
 
         if active:
-            p.setBrush(with_alpha(hud, int(70 + 110 * clamp(self.mic_level))))
+            p.setBrush(with_alpha(hud, 110))
             p.drawEllipse(rect)
 
             colour = QColor(255, 255, 255) if self.dark else QColor(0, 60, 90)
 
-            if self.assist_state in ("speaking", "thinking"):
+            if self.assist_state in ("thinking", "speaking"):
                 glyph = "\uE71A"   # stop
             else:
                 glyph = "\uE720"   # microphone
@@ -471,7 +407,7 @@ class AssistantMixin:
         p.restore()
 
     # ------------------------------------------------------------------ #
-    # Siri-style orb
+    # Glowing orb
     # ------------------------------------------------------------------ #
 
     @staticmethod
@@ -503,7 +439,32 @@ class AssistantMixin:
 
         return path
 
-    def _render_orb(self, now, level, state):
+    def _orb_params(self, now, level, state, live):
+        """Return (level, orbit speed, edge wobble, brightness) for a state."""
+
+        if state == "speaking":
+            lv = 0.25 + 0.6 * abs(
+                math.sin(now * 9.0) * math.sin(now * 3.1 + 0.7)
+            )
+            return lv, 1.9, 0.20 + 0.30 * lv, 1.0
+
+        if state == "thinking":
+            lv = 0.35 + 0.15 * math.sin(now * 5.0)
+            return lv, 3.2, 0.10, 1.0
+
+        if state == "error":
+            return 0.2, 0.6, 0.08, 1.0
+
+        if live:
+            lv = max(level, 0.14 + 0.06 * math.sin(now * 2.0))
+            return lv, 1.0 + 1.6 * lv, 0.07 + 0.30 * lv, 1.0
+
+        # Waiting for the microphone to come on: calm and dim.
+        return 0.06, 0.5, 0.05, 0.45
+
+    def _render_orb(self, now, params, state):
+        level, orbit, wobble, bright = params
+
         dpr = max(1.0, self.devicePixelRatioF())
         side = int(math.ceil(ORB_SIZE * dpr))
 
@@ -511,33 +472,11 @@ class AssistantMixin:
         image.setDevicePixelRatio(dpr)
         image.fill(QColor(9, 11, 26))
 
-        # Behaviour per state.
-        if state == "speaking":
-            level = 0.25 + 0.6 * abs(
-                math.sin(now * 9.0) * math.sin(now * 3.1 + 0.7)
-            )
-            orbit = 1.9
-            wobble = 0.20 + 0.30 * level
-
-        elif state == "thinking":
-            level = 0.35 + 0.15 * math.sin(now * 5.0)
-            orbit = 3.2
-            wobble = 0.10
-
-        elif state == "notice":
-            level = 0.2
-            orbit = 0.6
-            wobble = 0.08
-
-        else:  # listening
-            level = max(level, 0.12 + 0.06 * math.sin(now * 2.0))
-            orbit = 1.0 + 1.6 * level
-            wobble = 0.07 + 0.30 * level
-
-        palette = ORB_ALERT if state == "notice" else ORB_COLORS
+        palette = ORB_ALERT if state == "error" else ORB_COLORS
 
         cx = cy = ORB_SIZE / 2.0
         radius = ORB_RADIUS * (1.0 + 0.16 * level)
+        alpha = int(235 * bright)
 
         ip = QPainter(image)
         ip.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -554,7 +493,7 @@ class AssistantMixin:
             grad = QRadialGradient(QPointF(gx, gy), radius * 1.15)
             grad.setColorAt(
                 0.0,
-                QColor(colour.red(), colour.green(), colour.blue(), 235),
+                QColor(colour.red(), colour.green(), colour.blue(), alpha),
             )
             grad.setColorAt(
                 1.0,
@@ -571,7 +510,7 @@ class AssistantMixin:
             QPointF(cx - radius * 0.35, cy - radius * 0.45),
             radius * 0.7,
         )
-        gloss.setColorAt(0.0, QColor(255, 255, 255, 120))
+        gloss.setColorAt(0.0, QColor(255, 255, 255, int(120 * bright)))
         gloss.setColorAt(1.0, QColor(255, 255, 255, 0))
 
         ip.setBrush(QBrush(gloss))
@@ -593,134 +532,50 @@ class AssistantMixin:
         return image
 
     def _paint_assist(self, p, card):
-        th = self.th
         now = time.perf_counter()
         state = self._assist_draw_state
 
-        hud = QColor("#4FD8FF") if self.dark else QColor("#0A8FBF")
-
-        if state == "notice":
-            hud = QColor(th.bad)
-
-        level = clamp(self.mic_level)
-        hearing = state == "listening" and level > 0.18
+        params = self._orb_params(
+            now,
+            clamp(self.mic_level),
+            state,
+            self.mic_live,
+        )
+        glow_level = params[0]
 
         p.save()
         p.setOpacity(
             p.opacity() * clamp((now - self._assist_shown_at) / 0.25)
         )
 
-        cy = card.top() + min(card.height(), ASSIST_H) / 2
-        x0 = card.left() + 16
-        centre = QPointF(x0 + 19, cy)
+        centre = QPointF(
+            card.center().x(),
+            card.top() + min(card.height(), ASSIST_H) / 2,
+        )
 
-        # Soft coloured glow behind the orb.
-        glow_level = level if state == "listening" else 0.45
+        # Soft halo behind the orb: this is the "glow".
+        halo = QColor(255, 90, 90) if state == "error" else QColor(120, 130, 255)
 
-        glow = QRadialGradient(centre, 34.0)
-        glow.setColorAt(0.0, QColor(130, 110, 255, int(40 + 90 * glow_level)))
-        glow.setColorAt(1.0, QColor(130, 110, 255, 0))
+        glow = QRadialGradient(centre, 40.0)
+        glow.setColorAt(
+            0.0,
+            QColor(halo.red(), halo.green(), halo.blue(), int(30 + 100 * glow_level)),
+        )
+        glow.setColorAt(
+            1.0,
+            QColor(halo.red(), halo.green(), halo.blue(), 0),
+        )
 
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(glow))
-        p.drawEllipse(centre, 34.0, 34.0)
+        p.drawEllipse(centre, 40.0, 40.0)
 
         # The orb itself.
-        orb = self._render_orb(now, level, state)
+        orb = self._render_orb(now, params, state)
 
         p.drawImage(
             QPointF(centre.x() - ORB_SIZE / 2, centre.y() - ORB_SIZE / 2),
             orb,
         )
-
-        # Label: shows whether sound is actually arriving.
-        tx = x0 + 46
-        avail = ASSIST_W - 62 - 83
-
-        label = "HEARING YOU" if hearing else LABELS.get(state, "STANDBY")
-
-        label_font = QFont(ui_font(9, QFont.Weight.DemiBold))
-        label_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.4)
-
-        draw_text(
-            p,
-            f"GLANCE  \u00b7  {label}",
-            tx,
-            cy - 6,
-            label_font,
-            with_alpha(hud, 230),
-        )
-
-        # Caption: what Windows is hearing, or what Glance is saying.
-        caption = self.assist_caption
-        caption_t = self._assist_cap_t
-
-        if (
-            state == "listening"
-            and self.assist_hyp
-            and now - self._hyp_t < 1.8
-        ):
-            caption = self.assist_hyp
-            caption_t = self._hyp_t
-
-        self._draw_caption(
-            p,
-            caption,
-            tx,
-            cy + 13,
-            avail,
-            ui_font(12),
-            th.text,
-            now - caption_t,
-        )
-
-        # Live microphone level meter.
-        if state == "listening":
-            bx = card.right() - 16 - 28 - 10 - 23
-            profile = (0.5, 0.8, 1.0, 0.8, 0.5)
-
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(with_alpha(hud, 220 if hearing else 110))
-
-            for i, k in enumerate(profile):
-                wob = 0.75 + 0.25 * math.sin(now * 9.0 + i * 1.3)
-                h = 3.0 + level * 16.0 * k * wob
-
-                p.drawRoundedRect(
-                    QRectF(bx + i * 5, cy - h / 2, 3, h),
-                    1.5,
-                    1.5,
-                )
-
-        # Mic / stop button.
-        self._paint_mic_button(
-            p,
-            QRectF(card.right() - 44, cy - 14, 28, 28),
-        )
-
-        p.restore()
-
-    def _draw_caption(self, p, text, x, base, width, font, colour, elapsed):
-        """Single-line caption that scrolls when it is too long to fit."""
-
-        fm = QFontMetricsF(font)
-        text_w = fm.horizontalAdvance(text)
-
-        p.save()
-
-        p.setClipRect(
-            QRectF(x, base - fm.ascent(), width, fm.height()),
-            Qt.ClipOperation.IntersectClip,
-        )
-
-        if text_w <= width:
-            draw_text(p, text, x, base, font, colour)
-
-        else:
-            gap = 40.0
-            shift = (max(0.0, elapsed - 0.6) * 38.0) % (text_w + gap)
-
-            draw_text(p, text, x - shift, base, font, colour)
-            draw_text(p, text, x - shift + text_w + gap, base, font, colour)
 
         p.restore()
